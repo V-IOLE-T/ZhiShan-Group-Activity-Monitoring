@@ -34,7 +34,8 @@ class MessageCollector:
             response = requests.get(
                 url, 
                 headers=self.auth.get_headers(),
-                params=params
+                params=params,
+                timeout=10
             )
             data = response.json()
             
@@ -95,19 +96,21 @@ class MessageCollector:
                 response = requests.get(
                     url,
                     headers=self.auth.get_headers(),
-                    params=params
+                    params=params,
+                    timeout=10
                 )
                 data = response.json()
                 
                 if data.get('code') == 0:
-                    items = data.get('data', {}).get('items', [])
+                    data_obj = data.get('data') or {}
+                    items = data_obj.get('items') or []
                     for member in items:
                         # 优先使用在群里的备注名 (name)，如果没有则使用真实姓名
                         user_names[member.get('member_id')] = member.get('name', '')
                     
-                    if not data.get('data', {}).get('has_more'):
+                    if not data_obj.get('has_more'):
                         break
-                    page_token = data.get('data', {}).get('page_token')
+                    page_token = data_obj.get('page_token')
                 else:
                     print(f"获取群成员列表失败: {data}")
                     break
@@ -116,4 +119,35 @@ class MessageCollector:
                 break
         
         return user_names
+
+    def get_message_sender(self, message_id):
+        """获取指定消息的发送者 ID"""
+        if not message_id:
+            return None
+            
+        url = f"https://open.feishu.cn/open-apis/im/v1/messages/{message_id}"
+        try:
+            response = requests.get(
+                url,
+                headers=self.auth.get_headers(),
+                timeout=10
+            )
+            data = response.json()
+            if data.get('code') == 0:
+                data_obj = data.get('data') or {}
+                items = data_obj.get('items') or []
+                if not items:
+                    print(f"未找到消息 {message_id} 的详情")
+                    return None
+                    
+                sender = items[0].get('sender', {})
+                sender_id_obj = sender.get('id', {})
+                if isinstance(sender_id_obj, dict):
+                    return sender_id_obj.get('open_id')
+                return sender_id_obj
+            else:
+                print(f"获取消息详情失败: {data}")
+        except Exception as e:
+            print(f"请求消息详情出错: {e}")
+        return None
 
