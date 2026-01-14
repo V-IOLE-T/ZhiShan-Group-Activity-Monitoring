@@ -81,11 +81,11 @@ class MetricsCalculator:
         
         for user_id, data in metrics.items():
             score = (
-                data['message_count'] * 2.0 +
+                data['message_count'] * 1.0 +
                 data['char_count'] * 0.01 +
                 data['reply_received'] * 1.5 +
                 data['mention_received'] * 1.5 +
-                data['topic_initiated'] * 1.5
+                data['topic_initiated'] * 1.0
             )
             metrics[user_id]['score'] = round(score, 2)
         

@@ -87,11 +87,11 @@ class BitableStorage:
             })
             # 重新计算分数
             score = (
-                fields["发言次数"] * 2.0 +
+                fields["发言次数"] * 1.0 +
                 fields["发言字数"] * 0.01 +
                 fields["被回复数"] * 1.5 +
                 fields["单独被@次数"] * 1.5 +
-                fields["发起话题数"] * 1.5 +
+                fields["发起话题数"] * 1.0 +
                 fields["点赞数"] * 1.0 +
                 fields["被点赞数"] * 1.0
             )
@@ -127,11 +127,11 @@ class BitableStorage:
                 "被点赞数": metrics_delta.get("reaction_received", 0),
             })
             score = (
-                fields["发言次数"] * 2.0 +
+                fields["发言次数"] * 1.0 +
                 fields["发言字数"] * 0.01 +
                 fields["被回复数"] * 1.5 +
                 fields["单独被@次数"] * 1.5 +
-                fields["发起话题数"] * 1.5 +
+                fields["发起话题数"] * 1.0 +
                 fields["点赞数"] * 1.0 +
                 fields["被点赞数"] * 1.0
             )

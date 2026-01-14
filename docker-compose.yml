@@ -1,0 +1,16 @@
+version: '3.8'
+
+services:
+  feishu-monitor:
+    build: .
+    container_name: feishu-activity-monitor
+    restart: always
+    env_file:
+      - .env
+    volumes:
+      - ./logs:/app/logs
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
