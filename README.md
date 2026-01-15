@@ -1,16 +1,26 @@
-# 飞书群聊活跃度监测系统 V3
+# 飞书群聊活跃度监测系统 V4
 
-基于 Python 开发的**实时**飞书群聊活跃度监测工具，通过长连接 WebSocket 实时监听群消息和表情回复，自动计算用户活跃度并同步到飞书多维表格。
+基于 Python 开发的**企业级**飞书群聊活跃度监测工具，通过长连接 WebSocket 实时监听群消息和表情回复，自动计算用户活跃度并同步到飞书多维表格，支持 Pin 消息归档和富文本内容保存。
 
 ## ✨ 功能特性
 
+### 核心功能
 - 🔥 **实时监听**: 基于飞书长连接 WebSocket，毫秒级响应群消息和表情回复事件
 - 📊 **7项核心指标**: 发言次数、发言字数、被回复数、被@次数、发起话题数、点赞数、被点赞数
-- 🎯 **智能去重**: 自动识别重复事件，避免重复统计
+- 🎯 **智能去重**: 自动识别重复事件，避免重复统计（基于 LRU 缓存）
 - 🧠 **话题识别**: 支持话题模式群，智能区分话题发起和嵌套回复
 - 💾 **按月统计**: 数据按月份自动分组，支持历史数据追溯
 - 🔄 **实时同步**: 每条消息即时更新到飞书多维表格
 - 📈 **活跃度评分**: 多维度加权计算，科学评估用户活跃度
+
+### 高级功能 ⭐ NEW
+- 📌 **Pin消息归档**: 自动监控群内Pin消息变化，归档重要内容到多维表格
+- 🖼️ **富文本保存**: 支持保存图片、文件等附件到Bitable
+- 🔗 **消息跳转**: 为每条归档消息生成飞书消息链接，一键跳转查看原文
+- 📝 **消息撤回追踪**: 监控消息撤回事件，自动更新统计数据
+- 🎨 **互动卡片通知**: Pin消息时自动发送精美卡片提醒到群聊
+- ⚡ **API限流保护**: 集成智能限流器，避免触发飞书API速率限制
+- 🔒 **线程安全缓存**: 多线程环境下安全的LRU缓存实现
 
 ## 🏗️ 系统架构
 
@@ -32,17 +42,40 @@ Bitable 实时更新 (按月累加)
 
 ```
 feishu/
-├── auth.py                          # 飞书 API 认证模块
+# 核心模块
+├── auth.py                          # 飞书 API 认证模块 (支持 Token 自动刷新)
 ├── collector.py                     # 消息采集与用户信息查询
 ├── calculator.py                    # 活跃度指标计算引擎
 ├── storage.py                       # Bitable 数据存储模块
 ├── long_connection_listener.py      # 🚀 实时监听主程序 (推荐)
+├── pin_monitor.py                   # 📌 Pin消息监控与归档模块 (NEW)
+
+# 工具模块
+├── utils.py                         # 工具函数和LRU缓存实现
+├── rate_limiter.py                  # API 限流器
+├── logger.py                        # 日志管理模块
+├── config.py                        # 集中配置管理
+
+# 备用模式
 ├── main.py                          # 定时任务模式 (备用)
 ├── webhook_server.py                # Webhook 服务器 (备用)
-├── requirements.txt                 # Python 依赖包
+
+# 配置与部署
+├── requirements.txt                 # 生产环境依赖
+├── requirements-dev.txt             # 开发环境依赖
 ├── .env.example                     # 配置文件模板
-└── README.md                        # 项目文档
+├── Dockerfile                       # Docker 镜像构建
+├── docker-compose.yml               # Docker Compose 配置
+├── .github/workflows/ci.yml         # CI/CD 自动化流程
+
+# 文档
+├── README.md                        # 主文档
+├── PIN_FEATURE_GUIDE.md             # Pin功能详细指南
+├── LINK_FEATURE.md                  # 消息链接功能说明
+├── VISUALIZATION_GUIDE.md           # 数据可视化指南
+└── DEVELOPMENT.md                   # 开发者文档
 ```
+
 
 ## 🚀 快速开始
 
@@ -76,6 +109,7 @@ pip install -r requirements.txt
 #### 2.2 开通权限
 在「开发配置 → 权限管理」中开通以下权限：
 
+**基础权限（必需）**
 | 权限名称 | 权限代码 | 用途 |
 |---------|---------|------|
 | 获取与发送单聊、群组消息 | `im:message` | 读取群消息 |
@@ -84,16 +118,27 @@ pip install -r requirements.txt
 | 获取用户基本信息 | `contact:user.base:readonly` | 获取用户昵称 |
 | 以应用身份读取通讯录 | `contact:contact:readonly_as_app` | 查询用户信息 |
 
+**高级功能权限（推荐）**
+| 权限名称 | 权限代码 | 用途 |
+|---------|---------|------|
+| 获取群组中所有消息 | `im:message:readonly_as_app` | 读取Pin消息详情 |
+| 读取、编辑云空间中的文件 | `drive:drive` | 上传附件到云盘 |
+| 查看、评论和导出文档 | `docx:document` | 处理文档附件 |
+| 查看、评论和导出电子表格 | `sheets:spreadsheet` | 处理表格附件 |
+
 #### 2.3 配置事件订阅
 在「开发配置 → 事件订阅」中：
 1. 启用「长连接模式」（推荐）
 2. 订阅以下事件：
    - `im.message.receive_v1` (接收消息)
    - `im.message.reaction.created_v1` (表情回复)
+   - `im.message.message_read_v1` (消息已读，可选)
+   - `im.message.recalled_v1` (消息撤回，可选)
 
 #### 2.4 创建多维表格
-在飞书中创建多维表格，包含以下字段：
+在飞书中创建多维表格，需要以下两个数据表：
 
+**表1: 用户活跃度统计表**
 | 字段名 | 字段类型 | 说明 |
 |-------|---------|------|
 | 用户ID | 文本 | 用户唯一标识 |
@@ -110,6 +155,21 @@ pip install -r requirements.txt
 | 活跃度分数 | 数字 | 综合评分 (保留2位小数) |
 | 更新时间 | 数字 | 时间戳 (毫秒) |
 
+**表2: Pin消息归档表（可选，启用Pin监控功能时需要）**
+| 字段名 | 字段类型 | 说明 |
+|-------|---------|------|
+| 消息ID | 文本 | 消息唯一标识 |
+| 发送者名称 | 文本 | 消息发送者昵称 |
+| 发送者ID | 文本 | 发送者open_id |
+| 消息内容 | 文本 | 文本内容 |
+| 消息类型 | 单选 | text/image/file等 |
+| Pin操作者 | 文本 | 执行Pin的用户昵称 |
+| Pin时间 | 文本 | 格式: YYYY-MM-DD HH:MM:SS |
+| 消息链接 | URL | 点击跳转到原消息 |
+| 附件 | 附件 | 图片、文件等 |
+
+> 💡 详细配置步骤请参考 [PIN_FEATURE_GUIDE.md](PIN_FEATURE_GUIDE.md)
+
 ### 3. 配置文件
 
 ```bash
@@ -120,17 +180,22 @@ cp .env.example .env
 编辑 `.env` 文件：
 
 ```bash
+# 必需配置
 APP_ID=cli_xxxxxxxxxx
 APP_SECRET=xxxxxxxxxxxxxx
 CHAT_ID=oc_xxxxxxxxxx              # 目标群组ID
 BITABLE_APP_TOKEN=bascnxxxxxxxxxx  # 多维表格 App Token
-BITABLE_TABLE_ID=tblxxxxxxxxxx     # 多维表格 Table ID
+BITABLE_TABLE_ID=tblxxxxxxxxxx     # 用户活跃度统计表 ID
+
+# 可选配置（启用Pin监控功能时需要）
+PIN_ARCHIVE_TABLE_ID=tblxxxxxxxxxx # Pin消息归档表 ID
 ```
 
 **如何获取这些 ID？**
 - **CHAT_ID**: 群设置 → 高级设置 → 群ID
 - **BITABLE_APP_TOKEN**: 多维表格 URL 中 `/base/` 后面的部分
-- **BITABLE_TABLE_ID**: 多维表格 URL 中 `/tbl` 开头的部分
+- **BITABLE_TABLE_ID**: 活跃度统计表 URL 中 `/tbl` 开头的部分
+- **PIN_ARCHIVE_TABLE_ID**: Pin归档表 URL 中 `/tbl` 开头的部分
 
 ### 4. 运行程序
 
@@ -308,25 +373,45 @@ docker-compose down
 ## 🔍 核心功能说明
 
 ### 1. 智能去重机制
-- 使用 `event_id` 缓存避免重复处理
-- 缓存上限 1000 条，自动清理
+- 使用线程安全的 LRU 缓存避免重复处理事件
+- 事件 ID 缓存上限 1000 条，自动淘汰最久未使用的项
+- 用户昵称缓存上限 500 条，减少 API 调用
 
 ### 2. 话题模式识别
 在话题群中，当 `parent_id == root_id` 时：
 - 优先使用第一个 @ 对象作为被回复者
 - 避免将所有回复都计入话题发起人
 
-### 3. 防重复计费
+### 3. 防重复计分
 同一条消息中，如果用户已因"被回复"获得积分，则跳过"被@"积分，避免双重计费。
 
 ### 4. 昵称缓存
 - 自动缓存群成员昵称，减少 API 调用
 - 优先使用群内备注名
+- 线程安全，支持并发访问
 
 ### 5. 按月统计
 - 数据按 `YYYY-MM` 格式分月存储
 - 每月自动创建新记录
 - 支持跨月数据对比
+
+### 6. Pin消息监控 ⭐ NEW
+- 每30秒自动轮询检测群内Pin消息变化
+- 自动归档Pin消息的完整内容（文本、图片、文件等）
+- 智能下载附件并上传到飞书云盘
+- 生成消息跳转链接，一键定位原消息
+- 发送精美卡片通知到群聊
+- 取消Pin时静默删除归档记录
+
+### 7. API限流保护 ⚡ NEW
+- 智能限流器，默认每60秒最多20次API调用
+- 自动排队机制，避免触发飞书429错误
+- 可在 `config.py` 中自定义限流参数
+
+### 8. 消息撤回追踪 📝 NEW
+- 监控消息撤回事件
+- 自动从活跃度统计中减去相应数据
+- 保持数据准确性
 
 ## 🛠️ 常见问题
 
@@ -359,6 +444,37 @@ docker-compose down
 ### Q7: 能否同时监听多个群？
 当前版本仅支持单群监听。如需多群，可运行多个进程，每个配置不同的 `.env` 文件。
 
+### Q8: 如何启用Pin消息监控功能？
+1. 在 `.env` 中配置 `PIN_ARCHIVE_TABLE_ID`
+2. 在Bitable中创建Pin归档表（参考 [PIN_FEATURE_GUIDE.md](PIN_FEATURE_GUIDE.md)）
+3. 确保已开通相关权限（`im:message:readonly_as_app`、`drive:drive`）
+4. 运行 `long_connection_listener.py`，Pin监控会自动启动
+
+### Q9: Pin消息的附件无法上传怎么办？
+1. 确认已开通 `drive:drive` 权限
+2. 检查应用是否已添加到目标群组
+3. 查看日志中的具体错误信息
+4. 确保附件文件大小在飞书限制范围内（单文件 < 20MB）
+
+### Q10: 如何调整代码格式和进行开发？
+本项目配置了完整的开发环境：
+```bash
+# 安装开发依赖
+pip install -r requirements-dev.txt
+
+# 自动格式化代码
+black .
+isort .
+
+# 代码检查
+flake8 .
+mypy auth.py collector.py
+
+# 运行测试
+pytest tests/
+```
+详细说明请参考 [DEVELOPMENT.md](DEVELOPMENT.md)
+
 ## 📝 日志说明
 
 ### 正常日志示例
@@ -387,7 +503,16 @@ docker-compose down
 3. 仅授予必要的最小权限
 4. 生产环境使用独立的飞书应用
 
-## 📄 许可证
+## � 相关文档
+
+- 📌 [Pin功能完整指南](PIN_FEATURE_GUIDE.md) - Pin消息监控与归档功能详解
+- 🔗 [消息链接功能说明](LINK_FEATURE.md) - 为归档消息生成跳转链接
+- 📊 [数据可视化指南](VISUALIZATION_GUIDE.md) - 使用飞书仪表盘展示数据
+- 🚀 [快速开始：可视化](VISUALIZATION_QUICKSTART.md) - 5分钟搭建数据看板
+- 💻 [开发者文档](DEVELOPMENT.md) - 代码结构、测试、贡献指南
+- 🔄 [CI/CD配置指南](CI_CD_GUIDE.md) - 自动化测试与部署
+
+## �📄 许可证
 
 MIT License
 
