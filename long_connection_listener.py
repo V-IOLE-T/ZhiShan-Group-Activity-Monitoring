@@ -12,6 +12,7 @@ from calculator import MetricsCalculator
 from storage import BitableStorage, MessageArchiveStorage
 from collector import MessageCollector
 from config import CACHE_USER_NAME_SIZE, CACHE_EVENT_SIZE, TOPIC_ACTIVE_DAYS, TOPIC_SILENT_DAYS
+from pin_monitor import PinMonitor
 
 load_dotenv()
 
@@ -426,6 +427,18 @@ def main():
         print("❌ 错误: 请在 .env 中配置 APP_ID 和 APP_SECRET")
         return
 
+    # 初始化Pin监控(可选,需要配置PIN_TABLE_ID)
+    pin_monitor = None
+    pin_table_id = os.getenv('PIN_TABLE_ID')
+    pin_interval = int(os.getenv('PIN_MONITOR_INTERVAL', 30))  # 默认30秒
+    
+    if pin_table_id:
+        print(f"🔍 Pin监控已启用 (轮询间隔: {pin_interval}秒)")
+        pin_monitor = PinMonitor(auth, storage, CHAT_ID, interval=pin_interval)
+        pin_monitor.start()
+    else:
+        print("ℹ️  Pin监控未启用 (需要在.env中配置PIN_TABLE_ID)")
+
     # 初始化长连接客户端
     cli = lark.ws.Client(
         APP_ID, 
@@ -439,9 +452,18 @@ def main():
     print(f"系统时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"目标群组: {CHAT_ID}")
     print("特性: 超时重试已开启, 自动去重, 话题模式增强, 艾特去重")
+    if pin_monitor:
+        print("特性: Pin消息监控已启动")
     print("="*50)
 
-    cli.start()
+    try:
+        cli.start()
+    except KeyboardInterrupt:
+        print("\n🛑 收到退出信号，正在关闭...")
+        if pin_monitor:
+            pin_monitor.stop()
+        print("✅ 程序已安全退出")
 
 if __name__ == "__main__":
     main()
+

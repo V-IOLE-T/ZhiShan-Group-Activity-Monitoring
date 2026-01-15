@@ -160,6 +160,201 @@ class BitableStorage:
                 print(f"  > [API] ❌ 请求异常: {e}")
                 raise
 
+    @with_rate_limit
+    def archive_pin_message(self, pin_info):
+        """
+        归档Pin消息到专用表
+        
+        Args:
+            pin_info: Pin消息信息字典
+        """
+        pin_table_id = os.getenv('PIN_TABLE_ID')
+        if not pin_table_id:
+            print("[Pin归档] ⚠️ 未配置PIN_TABLE_ID，跳过归档")
+            return False
+        
+        # 构建Bitable字段
+        fields = {
+            "Pin消息ID": pin_info.get("message_id"),
+            "消息内容": pin_info.get("content", ""),
+            "消息类型": pin_info.get("message_type", "text"),
+            "发送者ID": pin_info.get("sender_id"),
+            "发送者姓名": pin_info.get("sender_name"),
+            "Pin操作人ID": pin_info.get("operator_id"),
+            "Pin操作人姓名": pin_info.get("operator_name"),
+            "Pin时间": pin_info.get("pin_time"),  # 文本格式: "2026-01-15 18:20:30"
+            "消息发送时间": pin_info.get("create_time"),  # 文本格式
+            "消息链接": {  # URL字段必须是对象格式
+                "link": f"https://applink.feishu.cn/client/chat/open?openId={os.getenv('CHAT_ID')}",
+                "text": "查看消息"
+            },
+            "归档时间": pin_info.get("archive_time")  # 文本格式
+        }
+        
+        # 添加附件(如果有)
+        file_tokens = pin_info.get("file_tokens", [])
+        if file_tokens:
+            fields["附件信息"] = file_tokens
+        
+        url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{self.app_token}/tables/{pin_table_id}/records"
+        
+        try:
+            response = requests.post(url, headers=self.auth.get_headers(), json={"fields": fields}, timeout=10)
+            result = response.json()
+            if result.get('code') == 0:
+                print(f"[Pin归档] ✅ Pin消息已归档到Bitable")
+                return True
+            else:
+                print(f"[Pin归档] ❌ 归档失败: {result}")
+                return False
+        except Exception as e:
+            print(f"[Pin归档] ❌ 归档异常: {e}")
+            return False
+
+    @with_rate_limit
+    def delete_pin_message(self, message_id):
+        """
+        从Pin归档表中删除记录
+        
+        Args:
+            message_id: Pin消息ID
+        """
+        pin_table_id = os.getenv('PIN_TABLE_ID')
+        if not pin_table_id:
+            return False
+        
+        # 先查找记录ID
+        search_url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{self.app_token}/tables/{pin_table_id}/records/search"
+        search_payload = {
+            "filter": {
+                "conjunction": "and",
+                "conditions": [{
+                    "field_name": "Pin消息ID",
+                    "operator": "is",
+                    "value": [message_id]
+                }]
+            }
+        }
+        
+        try:
+            response = requests.post(search_url, headers=self.auth.get_headers(), json=search_payload, timeout=10)
+            data = response.json()
+            
+            if data.get('code') == 0:
+                items = data.get('data', {}).get('items', [])
+                if not items:
+                    print(f"[Pin删除] ⚠️ 未找到Pin记录: {message_id}")
+                    return False
+                
+                record_id = items[0]['record_id']
+                
+                # 删除记录
+                delete_url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{self.app_token}/tables/{pin_table_id}/records/{record_id}"
+                del_response = requests.delete(delete_url, headers=self.auth.get_headers(), timeout=10)
+                del_result = del_response.json()
+                
+                if del_result.get('code') == 0:
+                    print(f"[Pin删除] ✅ 已删除Pin归档记录")
+                    return True
+                else:
+                    print(f"[Pin删除] ❌ 删除失败: {del_result}")
+                    return False
+        except Exception as e:
+            print(f"[Pin删除] ❌ 删除异常: {e}")
+            return False
+
+    @with_rate_limit
+    def increment_pin_count(self, user_id, user_name):
+        """
+        增加用户被Pin次数统计
+        
+        Args:
+            user_id: 用户ID
+            user_name: 用户名称
+        """
+        month = datetime.now().strftime("%Y-%m")
+        record = self.get_record_by_user_month(user_id, month)
+        
+        if record:
+            record_id = record['record_id']
+            old_fields = record['fields']
+            current_count = int(old_fields.get("被Pin次数", 0))
+            new_count = current_count + 1
+            
+            url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{self.app_token}/tables/{self.table_id}/records/{record_id}"
+            fields = {"被Pin次数": new_count}
+            
+            try:
+                response = requests.put(url, headers=self.auth.get_headers(), json={"fields": fields}, timeout=10)
+                result = response.json()
+                if result.get('code') == 0:
+                    print(f"[Pin统计] ✅ {user_name} 被Pin次数: {current_count} -> {new_count}")
+                else:
+                    print(f"[Pin统计] ❌ 更新被Pin次数失败: {result}")
+            except Exception as e:
+                print(f"[Pin统计] ❌ 更新异常: {e}")
+        else:
+            # 如果本月还没有活跃度记录，创建一条只有被Pin次数的记录
+            fields = {
+                "用户ID": user_id,
+                "用户名称": user_name,
+                "人员": [{"id": user_id}],
+                "统计周期": month,
+                "被Pin次数": 1,
+                "发言次数": 0,
+                "发言字数": 0,
+                "被回复数": 0,
+                "单独被@次数": 0,
+                "发起话题数": 0,
+                "点赞数": 0,
+                "被点赞数": 0,
+                "活跃度分数": 0,
+                "更新时间": int(datetime.now().timestamp() * 1000)
+            }
+            
+            url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{self.app_token}/tables/{self.table_id}/records"
+            try:
+                response = requests.post(url, headers=self.auth.get_headers(), json={"fields": fields}, timeout=10)
+                result = response.json()
+                if result.get('code') == 0:
+                    print(f"[Pin统计] ✅ 为 {user_name} 创建新记录，被Pin次数: 1")
+                else:
+                    print(f"[Pin统计] ❌ 创建记录失败: {result}")
+            except Exception as e:
+                print(f"[Pin统计] ❌ 创建异常: {e}")
+
+    @with_rate_limit
+    def decrement_pin_count(self, user_id, user_name):
+        """
+        减少用户被Pin次数统计
+        
+        Args:
+            user_id: 用户ID
+            user_name: 用户名称
+        """
+        month = datetime.now().strftime("%Y-%m")
+        record = self.get_record_by_user_month(user_id, month)
+        
+        if record:
+            record_id = record['record_id']
+            old_fields = record['fields']
+            current_count = int(old_fields.get("被Pin次数", 0))
+            new_count = max(0, current_count - 1)  # 确保不会小于0
+            
+            url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{self.app_token}/tables/{self.table_id}/records/{record_id}"
+            fields = {"被Pin次数": new_count}
+            
+            try:
+                response = requests.put(url, headers=self.auth.get_headers(), json={"fields": fields}, timeout=10)
+                result = response.json()
+                if result.get('code') == 0:
+                    print(f"[Pin统计] ✅ {user_name} 被Pin次数: {current_count} -> {new_count}")
+                else:
+                    print(f"[Pin统计] ❌ 更新被Pin次数失败: {result}")
+            except Exception as e:
+                print(f"[Pin统计] ❌ 更新异常: {e}")
+
+
 class MessageArchiveStorage:
     def __init__(self, auth):
         self.auth = auth
