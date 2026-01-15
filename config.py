@@ -12,6 +12,7 @@
 
 修改配置后会影响整个应用，建议在开发环境测试后再应用到生产环境
 """
+
 from typing import Dict
 
 # ========== 缓存配置 ==========
@@ -33,17 +34,17 @@ MAX_PAGES_PER_FETCH = 100  # 单次最多翻页数
 # 用于计算活跃度分数的各项指标权重
 # 公式: score = message_count * 1.0 + char_count * 0.01 + reply_received * 1.5 + ...
 ACTIVITY_WEIGHTS: Dict[str, float] = {
-    'message_count': 1.0,      # 发言次数权重
-    'char_count': 0.01,        # 发言字数权重（避免刷屏，权重较小）
-    'reply_received': 1.5,     # 被回复数权重（内容质量高）
-    'mention_received': 1.5,   # 被@次数权重（有影响力）
-    'topic_initiated': 1.0,    # 发起话题数权重
-    'reaction_given': 1.0,     # 点赞数权重
-    'reaction_received': 1.0   # 被点赞数权重
+    "message_count": 1.0,  # 发言次数权重
+    "char_count": 0.01,  # 发言字数权重（避免刷屏，权重较小）
+    "reply_received": 1.5,  # 被回复数权重（内容质量高）
+    "mention_received": 1.5,  # 被@次数权重（有影响力）
+    "topic_initiated": 1.0,  # 发起话题数权重
+    "reaction_given": 1.0,  # 点赞数权重
+    "reaction_received": 1.0,  # 被点赞数权重
 }
 
 # ========== 话题状态时间阈值（天）==========
-TOPIC_ACTIVE_DAYS = 7   # 活跃阈值：7天内有回复
+TOPIC_ACTIVE_DAYS = 7  # 活跃阈值：7天内有回复
 TOPIC_SILENT_DAYS = 30  # 沉默阈值：30天内有回复
 
 # ========== Token配置 ==========

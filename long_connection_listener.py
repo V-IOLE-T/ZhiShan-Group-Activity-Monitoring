@@ -17,9 +17,9 @@ from utils import LRUCache
 load_dotenv()
 
 # 初始化配置
-APP_ID = os.getenv('APP_ID')
-APP_SECRET = os.getenv('APP_SECRET')
-CHAT_ID = os.getenv('CHAT_ID')
+APP_ID = os.getenv("APP_ID")
+APP_SECRET = os.getenv("APP_SECRET")
+CHAT_ID = os.getenv("CHAT_ID")
 
 # 初始化组件
 auth = FeishuAuth()
@@ -35,22 +35,24 @@ user_name_cache = LRUCache(capacity=CACHE_USER_NAME_SIZE)
 # 事件去重缓存 - 使用LRU防止内存泄漏
 processed_events = LRUCache(capacity=CACHE_EVENT_SIZE)
 
+
 def get_cached_nickname(user_id):
     """获取缓存的昵称，如果不存在则从 API 获取并更新缓存"""
     if not user_id:
         return user_id
-        
+
     cached_name = user_name_cache.get(user_id)
     if cached_name:
         return cached_name
-    
+
     print(f"正在获取用户 {user_id} 的群备注...")
     names = collector.get_user_names([user_id])
     if names:
         for uid, name in names.items():
             user_name_cache.set(uid, name)
-    
+
     return user_name_cache.get(user_id, user_id)
+
 
 def do_p2_im_message_receive_v1(data: lark.im.v1.P2ImMessageReceiveV1) -> None:
     """处理接收消息 v2.0 事件"""
@@ -63,14 +65,14 @@ def do_p2_im_message_receive_v1(data: lark.im.v1.P2ImMessageReceiveV1) -> None:
     event = data.event
     message = event.message
     sender = event.sender
-    
+
     # 获取发送者 OpenID
     sender_id = sender.sender_id.open_id
     if not sender_id:
         return
 
     # [V3-LOG] 收到事件原始追踪
-    now_str = datetime.now().strftime('%H:%M:%S')
+    now_str = datetime.now().strftime("%H:%M:%S")
     print(f"\n[V3-LOG] [{now_str}] 收到新消息=========================")
 
     # 1. 验证群聊
@@ -81,11 +83,11 @@ def do_p2_im_message_receive_v1(data: lark.im.v1.P2ImMessageReceiveV1) -> None:
     # 2. 解析内容
     content_str = message.content
     char_count = calculator._extract_text_length(content_str)
-    
+
     print(f"  > 消息ID: {message.message_id}")
     print(f"  > 父ID (parent_id): {message.parent_id or 'None'}")
     print(f"  > 根ID (root_id): {message.root_id or 'None'}")
-    
+
     # 3. 获取发送者昵称
     user_name = get_cached_nickname(sender_id)
 
@@ -95,23 +97,23 @@ def do_p2_im_message_receive_v1(data: lark.im.v1.P2ImMessageReceiveV1) -> None:
         "char_count": char_count,
         "reply_received": 0,
         "mention_received": 0,
-        "topic_initiated": 1 if not message.root_id else 0
+        "topic_initiated": 1 if not message.root_id else 0,
     }
 
     # 5. 更新多维表格
     try:
         print(f"实时更新: {user_name} (字数: {char_count})")
         storage.update_or_create_record(sender_id, user_name, metrics_delta)
-        
+
         # 6. 特殊逻辑：处理被回复的情况
         parent_id = message.parent_id
         root_id = message.root_id
-        already_credited_ids = set() # 记录本消息中已经获得“被回复”积分的人
-        
+        already_credited_ids = set()  # 记录本消息中已经获得“被回复”积分的人
+
         if parent_id:
             # 识别目标用户 ID (target_parent_id)
             target_parent_id = None
-            
+
             # 启发式逻辑：在话题群中，parent_id 和 root_id 通常相同且指向话题头
             if parent_id == root_id and message.mentions:
                 target_parent_id = message.mentions[0].id.open_id
@@ -119,12 +121,14 @@ def do_p2_im_message_receive_v1(data: lark.im.v1.P2ImMessageReceiveV1) -> None:
             else:
                 # 普通群或直接回复话题，使用父消息发送者
                 target_parent_id = collector.get_message_sender(parent_id)
-            
+
             if target_parent_id:
                 # 获取被回复者昵称
                 target_user_name = get_cached_nickname(target_parent_id)
                 print(f"  > [更新] 增加被回复数给: {target_user_name}")
-                storage.update_or_create_record(target_parent_id, target_user_name, {"reply_received": 1})
+                storage.update_or_create_record(
+                    target_parent_id, target_user_name, {"reply_received": 1}
+                )
                 already_credited_ids.add(target_parent_id)
 
         # 7. 处理被 @ 的人
@@ -136,13 +140,15 @@ def do_p2_im_message_receive_v1(data: lark.im.v1.P2ImMessageReceiveV1) -> None:
                     if mentioned_id in already_credited_ids:
                         print(f"  > [跳过] {mentioned_id} 已在本次统计中作为被回复者，跳过艾特计费")
                         continue
-                        
+
                     mentioned_name = get_cached_nickname(mentioned_id)
                     print(f"  > [更新] 增加被艾特数给: {mentioned_name}")
-                    storage.update_or_create_record(mentioned_id, mentioned_name, {"mention_received": 1})
-        
+                    storage.update_or_create_record(
+                        mentioned_id, mentioned_name, {"mention_received": 1}
+                    )
+
         print("✅ 实时同步圆满成功")
-        
+
         # 8. 归档消息到新表
         try:
             archive_message_logic(message, sender_id, user_name)
@@ -151,6 +157,7 @@ def do_p2_im_message_receive_v1(data: lark.im.v1.P2ImMessageReceiveV1) -> None:
 
     except Exception as e:
         print(f"❌ 实时更新失败: {e}")
+
 
 def _process_message_attachments(message, message_id: str) -> list:
     """
@@ -180,7 +187,9 @@ def _process_message_attachments(message, message_id: str) -> list:
 
     # 解析content获取文件信息
     try:
-        content_obj = json.loads(message.content) if isinstance(message.content, str) else message.content
+        content_obj = (
+            json.loads(message.content) if isinstance(message.content, str) else message.content
+        )
     except (json.JSONDecodeError, ValueError):
         content_obj = {}
 
@@ -210,9 +219,15 @@ def _process_message_attachments(message, message_id: str) -> list:
     return file_tokens, text_content
 
 
-def _build_archive_fields(message, sender_id: str, user_name: str,
-                          text_content: str, file_tokens: list,
-                          month_str: str, timestamp_ms: int) -> dict:
+def _build_archive_fields(
+    message,
+    sender_id: str,
+    user_name: str,
+    text_content: str,
+    file_tokens: list,
+    month_str: str,
+    timestamp_ms: int,
+) -> dict:
     """
     构建消息归档字段
 
@@ -231,7 +246,7 @@ def _build_archive_fields(message, sender_id: str, user_name: str,
     # 构建消息链接
     message_link = {
         "link": f"https://applink.feishu.cn/client/chat/open?openChatId={CHAT_ID}&messageId={message.message_id}",
-        "text": "查看消息"
+        "text": "查看消息",
     }
 
     archive_fields = {
@@ -284,9 +299,15 @@ def _get_topic_status(last_reply_time_ms: int) -> str:
         return "冷却"
 
 
-def _update_topic_summary(message, sender_id: str, user_name: str,
-                          text_content: str, root_id: str,
-                          month_str: str, timestamp_ms: int):
+def _update_topic_summary(
+    message,
+    sender_id: str,
+    user_name: str,
+    text_content: str,
+    root_id: str,
+    month_str: str,
+    timestamp_ms: int,
+):
     """
     更新或创建话题汇总
 
@@ -304,7 +325,7 @@ def _update_topic_summary(message, sender_id: str, user_name: str,
     # 构建话题链接
     topic_link = {
         "link": f"https://applink.feishu.cn/client/chat/open?openChatId={CHAT_ID}&messageId={root_id}",
-        "text": "查看话题"
+        "text": "查看话题",
     }
 
     if not topic_record:
@@ -321,12 +342,12 @@ def _update_topic_summary(message, sender_id: str, user_name: str,
             "参与者": user_name,
             "话题状态": "活跃",
             "统计月份": month_str,
-            "话题链接": topic_link
+            "话题链接": topic_link,
         }
         archive_storage.update_or_create_topic(root_id, summary_fields, is_new=True)
     else:
         # 更新已有话题
-        old_fields = topic_record['fields']
+        old_fields = topic_record["fields"]
 
         # 更新参与者列表
         participants = set()
@@ -335,7 +356,7 @@ def _update_topic_summary(message, sender_id: str, user_name: str,
         if isinstance(participants_raw, list):
             for item in participants_raw:
                 if isinstance(item, dict):
-                    name = item.get('text', '')
+                    name = item.get("text", "")
                     if name:
                         participants.add(name)
                 elif isinstance(item, str) and item:
@@ -355,7 +376,7 @@ def _update_topic_summary(message, sender_id: str, user_name: str,
             "回复数": int(old_fields.get("回复数", 0)) + 1,
             "参与人数": len(participants),
             "参与者": ", ".join(participants),
-            "话题状态": topic_status
+            "话题状态": topic_status,
         }
         archive_storage.update_or_create_topic(root_id, summary_fields, is_new=False)
 
@@ -380,9 +401,7 @@ def archive_message_logic(message, sender_id, user_name):
 
     # 2. 构建归档字段
     archive_fields = _build_archive_fields(
-        message, sender_id, user_name,
-        text_content, file_tokens,
-        month_str, timestamp_ms
+        message, sender_id, user_name, text_content, file_tokens, month_str, timestamp_ms
     )
 
     # 3. 保存到消息归档表
@@ -391,9 +410,7 @@ def archive_message_logic(message, sender_id, user_name):
     # 4. 更新话题汇总
     root_id = message.root_id or message.message_id
     _update_topic_summary(
-        message, sender_id, user_name,
-        text_content, root_id,
-        month_str, timestamp_ms
+        message, sender_id, user_name, text_content, root_id, month_str, timestamp_ms
     )
 
 
@@ -404,67 +421,68 @@ def do_p2_im_message_reaction_created_v1(data: lark.im.v1.P2ImMessageReactionCre
     if event_id in processed_events:
         return
     processed_events.set(event_id, True)  # LRU会自动管理容量，无需手动清理
-    
+
     event = data.event
-    
+
     # 获取操作者ID（点赞的人）
     operator_id = event.user_id.open_id if event.user_id else None
     if not operator_id:
         return
-    
+
     # 获取消息ID
     message_id = event.message_id
     if not message_id:
         return
-    
+
     # [V3-LOG] 表情回复事件追踪
-    now_str = datetime.now().strftime('%H:%M:%S')
+    now_str = datetime.now().strftime("%H:%M:%S")
     print(f"\n[V3-LOG] [{now_str}] 收到表情回复事件===================")
     print(f"  > 消息ID: {message_id}")
     print(f"  > 操作者ID: {operator_id}")
-    
+
     try:
         # 1. 获取消息的发送者（被点赞的人）
         message_sender_id = collector.get_message_sender(message_id)
         if not message_sender_id:
             print(f"  > [跳过] 无法获取消息发送者")
             return
-        
+
         # 2. 获取昵称
         operator_name = get_cached_nickname(operator_id)
         receiver_name = get_cached_nickname(message_sender_id)
-        
+
         print(f"  > 点赞者: {operator_name}")
         print(f"  > 被点赞者: {receiver_name}")
-        
+
         # 3. 更新点赞者的"点赞数"
         storage.update_or_create_record(
-            user_id=operator_id,
-            user_name=operator_name,
-            metrics_delta={"reaction_given": 1}
+            user_id=operator_id, user_name=operator_name, metrics_delta={"reaction_given": 1}
         )
-        
+
         # 4. 更新被点赞者的"被点赞数"
         if message_sender_id != operator_id:  # 避免自己给自己点赞的情况
             storage.update_or_create_record(
                 user_id=message_sender_id,
                 user_name=receiver_name,
-                metrics_delta={"reaction_received": 1}
+                metrics_delta={"reaction_received": 1},
             )
         else:
             print(f"  > [跳过] 用户给自己点赞")
-        
+
         print("✅ 表情回复统计成功")
-        
+
     except Exception as e:
         print(f"❌ 表情回复统计失败: {e}")
 
 
 # 初始化事件处理器
-event_handler = lark.EventDispatcherHandler.builder("", "") \
-    .register_p2_im_message_receive_v1(do_p2_im_message_receive_v1) \
-    .register_p2_im_message_reaction_created_v1(do_p2_im_message_reaction_created_v1) \
+event_handler = (
+    lark.EventDispatcherHandler.builder("", "")
+    .register_p2_im_message_receive_v1(do_p2_im_message_receive_v1)
+    .register_p2_im_message_reaction_created_v1(do_p2_im_message_reaction_created_v1)
     .build()
+)
+
 
 def main():
     if not APP_ID or not APP_SECRET:
@@ -473,9 +491,9 @@ def main():
 
     # 初始化Pin监控(可选,需要配置PIN_TABLE_ID)
     pin_monitor = None
-    pin_table_id = os.getenv('PIN_TABLE_ID')
-    pin_interval = int(os.getenv('PIN_MONITOR_INTERVAL', 30))  # 默认30秒
-    
+    pin_table_id = os.getenv("PIN_TABLE_ID")
+    pin_interval = int(os.getenv("PIN_MONITOR_INTERVAL", 30))  # 默认30秒
+
     if pin_table_id:
         print(f"🔍 Pin监控已启用 (轮询间隔: {pin_interval}秒)")
         pin_monitor = PinMonitor(auth, storage, CHAT_ID, interval=pin_interval)
@@ -485,20 +503,17 @@ def main():
 
     # 初始化长连接客户端
     cli = lark.ws.Client(
-        APP_ID, 
-        APP_SECRET,
-        event_handler=event_handler,
-        log_level=lark.LogLevel.INFO
+        APP_ID, APP_SECRET, event_handler=event_handler, log_level=lark.LogLevel.INFO
     )
 
-    print("="*50)
+    print("=" * 50)
     print("🚀 飞书实时监听 [V3-STABLE] 启动")
     print(f"系统时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"目标群组: {CHAT_ID}")
     print("特性: 超时重试已开启, 自动去重, 话题模式增强, 艾特去重")
     if pin_monitor:
         print("特性: Pin消息监控已启动")
-    print("="*50)
+    print("=" * 50)
 
     try:
         cli.start()
@@ -508,6 +523,6 @@ def main():
             pin_monitor.stop()
         print("✅ 程序已安全退出")
 
+
 if __name__ == "__main__":
     main()
-

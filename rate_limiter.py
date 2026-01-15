@@ -4,6 +4,7 @@ API速率限制器
 防止API调用过快导致被飞书限流（HTTP 429错误）
 使用滑动窗口算法实现速率限制
 """
+
 import time
 from functools import wraps
 from typing import Callable, Dict, Any, List
@@ -61,12 +62,12 @@ class RateLimiter:
         now = time.time()
         # 清理过期的记录
         self.calls = [call_time for call_time in self.calls if now - call_time < self.period]
-        
+
         if len(self.calls) < self.max_calls:
             self.calls.append(now)
             return True
         return False
-    
+
     def wait_if_needed(self) -> None:
         """
         如果超限则等待，直到可以调用
@@ -97,7 +98,7 @@ class RateLimiter:
                     break
             else:
                 break
-    
+
     def get_status(self) -> Dict[str, Any]:
         """
         获取当前限流状态
@@ -120,10 +121,10 @@ class RateLimiter:
         self.calls = [call_time for call_time in self.calls if now - call_time < self.period]
         remaining = self.max_calls - len(self.calls)
         return {
-            'used': len(self.calls),
-            'remaining': remaining,
-            'limit': self.max_calls,
-            'period': self.period
+            "used": len(self.calls),
+            "remaining": remaining,
+            "limit": self.max_calls,
+            "period": self.period,
         }
 
 
@@ -158,8 +159,10 @@ def with_rate_limit(func: Callable) -> Callable:
         - 限流参数从config.py读取
         - 如果超限会自动等待
     """
+
     @wraps(func)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
         api_limiter.wait_if_needed()
         return func(*args, **kwargs)
+
     return wrapper

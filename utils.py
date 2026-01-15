@@ -2,6 +2,7 @@
 工具函数和通用类
 包含项目中复用的工具类和辅助函数
 """
+
 import threading
 from collections import OrderedDict
 from typing import Any, Dict, Optional
@@ -185,10 +186,10 @@ def extract_open_id(sender_id_obj: Any) -> str:
         ''
     """
     if isinstance(sender_id_obj, dict):
-        return sender_id_obj.get('open_id', '')
+        return sender_id_obj.get("open_id", "")
     elif isinstance(sender_id_obj, str):
         return sender_id_obj
-    return ''
+    return ""
 
 
 def sanitize_log_data(data: Any) -> Any:
@@ -207,12 +208,11 @@ def sanitize_log_data(data: Any) -> Any:
         >>> sanitize_log_data({"token": "abc123", "name": "张三"})
         {'token': '***', 'name': '张三'}
     """
-    sensitive_keys = ['token', 'secret', 'password', 'authorization', 'app_secret']
+    sensitive_keys = ["token", "secret", "password", "authorization", "app_secret"]
 
     if isinstance(data, dict):
         return {
-            k: '***' if any(s in k.lower() for s in sensitive_keys) else v
-            for k, v in data.items()
+            k: "***" if any(s in k.lower() for s in sensitive_keys) else v for k, v in data.items()
         }
     return data
 
@@ -222,7 +222,7 @@ def upload_file_to_bitable(
     file_name: str,
     app_token: str,
     auth_token: str,
-    upload_url: str = "https://open.feishu.cn/open-apis/drive/v1/medias/upload_all"
+    upload_url: str = "https://open.feishu.cn/open-apis/drive/v1/medias/upload_all",
 ) -> Optional[Dict[str, Any]]:
     """
     上传文件到飞书多维表格
@@ -259,27 +259,19 @@ def upload_file_to_bitable(
     import requests
 
     form_data = {
-        'file_name': file_name,
-        'parent_type': 'bitable_file',
-        'parent_node': app_token,
-        'size': str(len(file_content))
+        "file_name": file_name,
+        "parent_type": "bitable_file",
+        "parent_node": app_token,
+        "size": str(len(file_content)),
     }
 
-    files = {
-        'file': (file_name, file_content)
-    }
+    files = {"file": (file_name, file_content)}
 
-    upload_headers = {
-        "Authorization": f"Bearer {auth_token}"
-    }
+    upload_headers = {"Authorization": f"Bearer {auth_token}"}
 
     try:
         response = requests.post(
-            upload_url,
-            headers=upload_headers,
-            data=form_data,
-            files=files,
-            timeout=60
+            upload_url, headers=upload_headers, data=form_data, files=files, timeout=60
         )
 
         if response.status_code != 200:
@@ -294,9 +286,9 @@ def upload_file_to_bitable(
             print(f"  > [文件上传] 原始响应: {response.text[:200]}")
             return None
 
-        if result.get('code') == 0:
-            data_obj = result.get('data', {})
-            file_token = data_obj.get('file_token')
+        if result.get("code") == 0:
+            data_obj = result.get("data", {})
+            file_token = data_obj.get("file_token")
 
             if file_token:
                 print(f"  > [文件上传] ✅ 文件已上传: {file_name} -> {file_token}")
@@ -304,7 +296,7 @@ def upload_file_to_bitable(
                     "file_token": file_token,
                     "name": file_name,
                     "size": len(file_content),
-                    "type": "file"
+                    "type": "file",
                 }
             else:
                 print(f"  > [文件上传] ❌ 响应中未找到file_token: {result}")

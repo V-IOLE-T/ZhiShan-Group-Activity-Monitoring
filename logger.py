@@ -2,6 +2,7 @@
 日志系统配置
 提供统一的日志记录功能，支持控制台和文件输出
 """
+
 import logging
 import os
 from datetime import datetime
@@ -41,8 +42,7 @@ def setup_logger(name: str, level: str = "INFO") -> logging.Logger:
 
     # 创建格式化器
     formatter = logging.Formatter(
-        '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S'
+        "%(asctime)s - %(name)s - %(levelname)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
     )
 
     # 控制台处理器
@@ -53,14 +53,14 @@ def setup_logger(name: str, level: str = "INFO") -> logging.Logger:
 
     # 文件处理器 - 按日期分割日志文件
     log_file = LOGS_DIR / f"feishu_{datetime.now().strftime('%Y%m%d')}.log"
-    file_handler = logging.FileHandler(log_file, encoding='utf-8')
+    file_handler = logging.FileHandler(log_file, encoding="utf-8")
     file_handler.setLevel(logging.DEBUG)
     file_handler.setFormatter(formatter)
     logger.addHandler(file_handler)
 
     # 错误日志单独记录
     error_log_file = LOGS_DIR / f"feishu_error_{datetime.now().strftime('%Y%m%d')}.log"
-    error_handler = logging.FileHandler(error_log_file, encoding='utf-8')
+    error_handler = logging.FileHandler(error_log_file, encoding="utf-8")
     error_handler.setLevel(logging.ERROR)
     error_handler.setFormatter(formatter)
     logger.addHandler(error_handler)

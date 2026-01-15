@@ -3,6 +3,7 @@ rate_limiter.py 单元测试
 
 测试速率限制器的核心功能和边界情况
 """
+
 import unittest
 import time
 from unittest.mock import patch
@@ -80,10 +81,10 @@ class TestRateLimiter(unittest.TestCase):
 
         status = limiter.get_status()
 
-        self.assertEqual(status['used'], 0)
-        self.assertEqual(status['remaining'], 10)
-        self.assertEqual(status['limit'], 10)
-        self.assertEqual(status['period'], 60)
+        self.assertEqual(status["used"], 0)
+        self.assertEqual(status["remaining"], 10)
+        self.assertEqual(status["limit"], 10)
+        self.assertEqual(status["period"], 60)
 
     def test_get_status_after_calls(self):
         """测试调用后的状态"""
@@ -95,9 +96,9 @@ class TestRateLimiter(unittest.TestCase):
 
         status = limiter.get_status()
 
-        self.assertEqual(status['used'], 3)
-        self.assertEqual(status['remaining'], 2)
-        self.assertEqual(status['limit'], 5)
+        self.assertEqual(status["used"], 3)
+        self.assertEqual(status["remaining"], 2)
+        self.assertEqual(status["limit"], 5)
 
     def test_get_status_cleans_old_calls(self):
         """测试get_status会清理过期记录"""
@@ -107,14 +108,14 @@ class TestRateLimiter(unittest.TestCase):
         limiter.is_allowed()
 
         status1 = limiter.get_status()
-        self.assertEqual(status1['used'], 2)
+        self.assertEqual(status1["used"], 2)
 
         # 等待过期
         time.sleep(1.1)
 
         status2 = limiter.get_status()
-        self.assertEqual(status2['used'], 0)
-        self.assertEqual(status2['remaining'], 3)
+        self.assertEqual(status2["used"], 0)
+        self.assertEqual(status2["remaining"], 3)
 
     def test_wait_if_needed_no_wait(self):
         """测试未超限时不需要等待"""
@@ -206,6 +207,7 @@ class TestWithRateLimitDecorator(unittest.TestCase):
 
     def test_decorator_with_args(self):
         """测试装饰器处理带参数的函数"""
+
         @with_rate_limit
         def add(a, b):
             return a + b
@@ -215,6 +217,7 @@ class TestWithRateLimitDecorator(unittest.TestCase):
 
     def test_decorator_with_kwargs(self):
         """测试装饰器处理关键字参数"""
+
         @with_rate_limit
         def greet(name, greeting="Hello"):
             return f"{greeting}, {name}"
@@ -224,6 +227,7 @@ class TestWithRateLimitDecorator(unittest.TestCase):
 
     def test_decorator_preserves_function_name(self):
         """测试装饰器保留函数名"""
+
         @with_rate_limit
         def my_function():
             """My docstring"""
@@ -232,9 +236,10 @@ class TestWithRateLimitDecorator(unittest.TestCase):
         self.assertEqual(my_function.__name__, "my_function")
         self.assertEqual(my_function.__doc__, "My docstring")
 
-    @patch('rate_limiter.api_limiter')
+    @patch("rate_limiter.api_limiter")
     def test_decorator_calls_wait_if_needed(self, mock_limiter):
         """测试装饰器调用wait_if_needed"""
+
         @with_rate_limit
         def test_func():
             return "result"
@@ -322,10 +327,10 @@ class TestEdgeCases(unittest.TestCase):
         status2 = limiter.get_status()
         status3 = limiter.get_status()
 
-        self.assertEqual(status1['used'], 2)
-        self.assertEqual(status2['used'], 2)
-        self.assertEqual(status3['used'], 2)
+        self.assertEqual(status1["used"], 2)
+        self.assertEqual(status2["used"], 2)
+        self.assertEqual(status3["used"], 2)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

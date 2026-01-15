@@ -3,6 +3,7 @@
 
 提供飞书tenant_access_token的获取和自动刷新功能
 """
+
 import requests
 import os
 from datetime import datetime
@@ -43,8 +44,8 @@ class FeishuAuth:
         Raises:
             ValueError: 当APP_ID或APP_SECRET未配置时
         """
-        self.app_id: Optional[str] = os.getenv('APP_ID')
-        self.app_secret: Optional[str] = os.getenv('APP_SECRET')
+        self.app_id: Optional[str] = os.getenv("APP_ID")
+        self.app_secret: Optional[str] = os.getenv("APP_SECRET")
         self.tenant_access_token: Optional[str] = None
         self.token_expire_time: float = 0
 
@@ -80,23 +81,22 @@ class FeishuAuth:
         if not force_refresh and self.tenant_access_token:
             if datetime.now().timestamp() < self.token_expire_time:
                 return self.tenant_access_token
-        
+
         url = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
-        payload = {
-            "app_id": self.app_id,
-            "app_secret": self.app_secret
-        }
-        
+        payload = {"app_id": self.app_id, "app_secret": self.app_secret}
+
         try:
             response = requests.post(url, json=payload, timeout=10)
             data = response.json()
-            
-            if data.get('code') == 0:
-                self.tenant_access_token = data['tenant_access_token']
+
+            if data.get("code") == 0:
+                self.tenant_access_token = data["tenant_access_token"]
                 # 设置过期时间（API返回的expire字段，默认7200秒，提前5分钟刷新）
-                expire_in = data.get('expire', 7200) - 300
+                expire_in = data.get("expire", 7200) - 300
                 self.token_expire_time = datetime.now().timestamp() + expire_in
-                expire_time_str = datetime.fromtimestamp(self.token_expire_time).strftime('%H:%M:%S')
+                expire_time_str = datetime.fromtimestamp(self.token_expire_time).strftime(
+                    "%H:%M:%S"
+                )
                 logger.info(f"✅ Token获取成功，有效期至 {expire_time_str}")
                 return self.tenant_access_token
             else:
@@ -111,7 +111,7 @@ class FeishuAuth:
             error_msg = f"获取token请求失败: {e}"
             logger.error(f"❌ {error_msg}")
             raise Exception(error_msg)
-    
+
     def get_headers(self) -> Dict[str, str]:
         """
         获取飞书API请求头，自动刷新token
@@ -129,8 +129,8 @@ class FeishuAuth:
         """
         if not self.tenant_access_token or datetime.now().timestamp() >= self.token_expire_time:
             self.get_tenant_access_token(force_refresh=True)
-        
+
         return {
             "Authorization": f"Bearer {self.tenant_access_token}",
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
         }

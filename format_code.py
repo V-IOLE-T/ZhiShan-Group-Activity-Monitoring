@@ -3,6 +3,7 @@
 
 运行Black、isort和flake8对代码进行格式化和检查
 """
+
 import subprocess
 import sys
 
@@ -30,15 +31,11 @@ def main():
 
     # 检查是否安装了所需工具
     print("\n📦 检查所需工具...")
-    required_tools = ['black', 'isort', 'flake8']
+    required_tools = ["black", "isort", "flake8"]
     missing_tools = []
 
     for tool in required_tools:
-        check_result = subprocess.run(
-            f"{tool} --version",
-            shell=True,
-            capture_output=True
-        )
+        check_result = subprocess.run(f"{tool} --version", shell=True, capture_output=True)
         if check_result.returncode != 0:
             missing_tools.append(tool)
 
@@ -51,37 +48,23 @@ def main():
     print("✅ 所有工具已安装")
 
     # 运行isort整理导入
-    code1 = run_command(
-        "isort .",
-        "使用isort整理导入语句"
-    )
+    code1 = run_command("isort .", "使用isort整理导入语句")
 
     # 运行Black格式化
-    code2 = run_command(
-        "black .",
-        "使用Black格式化代码"
-    )
+    code2 = run_command("black .", "使用Black格式化代码")
 
     # 运行flake8检查
-    code3 = run_command(
-        "flake8 .",
-        "使用flake8检查代码质量"
-    )
+    code3 = run_command("flake8 .", "使用flake8检查代码质量")
 
     # 运行mypy类型检查（可选）
     print(f"\n{'='*60}")
     print("🔍 运行mypy类型检查（可选）")
     print(f"{'='*60}")
-    mypy_result = subprocess.run(
-        "mypy --version",
-        shell=True,
-        capture_output=True
-    )
+    mypy_result = subprocess.run("mypy --version", shell=True, capture_output=True)
 
     if mypy_result.returncode == 0:
         code4 = run_command(
-            "mypy auth.py collector.py rate_limiter.py utils.py logger.py",
-            "使用mypy检查类型提示"
+            "mypy auth.py collector.py rate_limiter.py utils.py logger.py", "使用mypy检查类型提示"
         )
     else:
         print("⚠️ mypy未安装，跳过类型检查")
@@ -104,5 +87,5 @@ def main():
     return 0
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     sys.exit(main())

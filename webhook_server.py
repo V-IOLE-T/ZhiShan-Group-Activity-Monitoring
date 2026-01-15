@@ -23,6 +23,7 @@ processed_events = LRUCache(capacity=1000)
 # 用户昵称缓存（避免频繁请求通讯录/群成员接口）
 user_name_cache = LRUCache(capacity=500)
 
+
 @app.post("/webhook")
 async def webhook_handler(request: Request):
     try:
@@ -54,16 +55,16 @@ async def webhook_handler(request: Request):
         event_payload = data.get("event", {})
         message = event_payload.get("message", {})
         sender = event_payload.get("sender", {})
-        
+
         sender_id = sender.get("sender_id", {}).get("open_id")
         if not sender_id:
             return {"status": "ignore_no_sender"}
 
         content_str = message.get("content", "")
-        
+
         # 计算字数
         char_count = calculator._extract_text_length(content_str)
-        
+
         # 确定用户昵称（优先使用缓存，不存在则更新缓存）
         user_name = user_name_cache.get(sender_id)
         if not user_name:
@@ -77,32 +78,36 @@ async def webhook_handler(request: Request):
         metrics_delta = {
             "message_count": 1,
             "char_count": char_count,
-            "reply_received": 0,    # 实时模式下较难统计被回复数（需要历史上下文）
+            "reply_received": 0,  # 实时模式下较难统计被回复数（需要历史上下文）
             "mention_received": 0,  # 给被提的人加分逻辑暂未实现
-            "topic_initiated": 1 if not message.get("root_id") else 0
+            "topic_initiated": 1 if not message.get("root_id") else 0,
         }
 
         # 更新多维表格
         try:
             print(f"[{datetime.now().strftime('%H:%M:%S')}] 实时更新用户: {user_name}")
             storage.update_or_create_record(sender_id, user_name, metrics_delta)
-            
+
             # 如果消息中提到了人，也可以尝试给被提到的人加分（由于飞书只给 open_id，我们需要单独处理）
             mentions = message.get("mentions", [])
             for mention in mentions:
                 mentioned_id = mention.get("id", {}).get("open_id")
                 if mentioned_id:
                     # 给被@的人加 1.5 分对应的指标
-                    storage.update_or_create_record(mentioned_id, mentioned_id, {"mention_received": 1})
-            
+                    storage.update_or_create_record(
+                        mentioned_id, mentioned_id, {"mention_received": 1}
+                    )
+
         except Exception as e:
             print(f"❌ 更新表格失败: {e}")
 
     return {"status": "ok"}
 
+
 @app.get("/health")
 async def health_check():
     return {"status": "alive"}
+
 
 if __name__ == "__main__":
     print("🚀 飞书实时监听 Webhook 服务器正在启动...")

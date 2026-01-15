@@ -3,6 +3,7 @@ utils.py 单元测试
 
 测试LRU缓存、线程安全缓存和工具函数
 """
+
 import unittest
 import threading
 import time
@@ -159,7 +160,7 @@ class TestThreadSafeLRUCache(unittest.TestCase):
             threading.Thread(target=writer_thread, args=(0,)),
             threading.Thread(target=writer_thread, args=(50,)),
             threading.Thread(target=reader_thread),
-            threading.Thread(target=reader_thread)
+            threading.Thread(target=reader_thread),
         ]
 
         for t in threads:
@@ -224,12 +225,7 @@ class TestUtilityFunctions(unittest.TestCase):
 
     def test_sanitize_log_data_dict(self):
         """测试清理日志字典中的敏感信息"""
-        data = {
-            "token": "abc123",
-            "app_secret": "secret123",
-            "name": "张三",
-            "age": 25
-        }
+        data = {"token": "abc123", "app_secret": "secret123", "name": "张三", "age": 25}
 
         result = sanitize_log_data(data)
 
@@ -248,11 +244,7 @@ class TestUtilityFunctions(unittest.TestCase):
 
     def test_sanitize_log_data_case_insensitive(self):
         """测试清理敏感信息是否大小写不敏感"""
-        data = {
-            "Token": "abc123",
-            "APP_SECRET": "secret123",
-            "Authorization": "Bearer xxx"
-        }
+        data = {"Token": "abc123", "APP_SECRET": "secret123", "Authorization": "Bearer xxx"}
 
         result = sanitize_log_data(data)
 
@@ -261,5 +253,5 @@ class TestUtilityFunctions(unittest.TestCase):
         self.assertEqual(result["Authorization"], "***")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()
