@@ -297,7 +297,7 @@ def archive_message_logic(message, sender_id, user_name):
         # 创建新话题
         summary_fields = {
             "话题ID": root_id,
-            "话题标题": text_content[:50],
+            "话题标题": text_content,  # 保存完整内容,不截断
             "发起人": [{"id": sender_id}],
             "发起人姓名": user_name,
             "创建时间": timestamp_ms,

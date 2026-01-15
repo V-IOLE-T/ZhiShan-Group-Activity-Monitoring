@@ -248,7 +248,7 @@ class PinMonitor:
                 "template": "orange",
                 "title": {
                     "tag": "plain_text",
-                    "content": "🔥 新增加精话题"
+                    "content": "🌟 新增加精话题"
                 }
             },
             "elements": [
