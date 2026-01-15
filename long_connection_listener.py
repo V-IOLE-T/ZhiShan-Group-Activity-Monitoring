@@ -1,6 +1,5 @@
 import os
 import json
-from collections import OrderedDict
 from dotenv import load_dotenv
 import lark_oapi as lark
 from lark_oapi.api.im.v1 import *
@@ -13,6 +12,7 @@ from storage import BitableStorage, MessageArchiveStorage
 from collector import MessageCollector
 from config import CACHE_USER_NAME_SIZE, CACHE_EVENT_SIZE, TOPIC_ACTIVE_DAYS, TOPIC_SILENT_DAYS
 from pin_monitor import PinMonitor
+from utils import LRUCache
 
 load_dotenv()
 
@@ -27,36 +27,6 @@ storage = BitableStorage(auth)
 archive_storage = MessageArchiveStorage(auth)
 collector = MessageCollector(auth)
 calculator = MetricsCalculator([])
-
-
-class LRUCache:
-    """简单的LRU缓存实现，防止内存泄漏"""
-    def __init__(self, capacity=500):
-        self.cache = OrderedDict()
-        self.capacity = capacity
-    
-    def get(self, key, default=None):
-        """获取缓存值"""
-        if key in self.cache:
-            # 移到最后（最近使用）
-            self.cache.move_to_end(key)
-            return self.cache[key]
-        return default
-    
-    def set(self, key, value):
-        """设置缓存值"""
-        if key in self.cache:
-            self.cache.move_to_end(key)
-        self.cache[key] = value
-        # 超出容量时删除最久未使用的项
-        if len(self.cache) > self.capacity:
-            self.cache.popitem(last=False)
-    
-    def __contains__(self, key):
-        return key in self.cache
-    
-    def __len__(self):
-        return len(self.cache)
 
 
 # 用户昵称缓存 - 使用LRU防止内存泄漏
@@ -182,62 +152,88 @@ def do_p2_im_message_receive_v1(data: lark.im.v1.P2ImMessageReceiveV1) -> None:
     except Exception as e:
         print(f"❌ 实时更新失败: {e}")
 
-def archive_message_logic(message, sender_id, user_name):
-    """处理消息归档和话题汇总的具体逻辑"""
-    now = datetime.now()
-    month_str = now.strftime("%Y-%m")
-    timestamp_ms = int(now.timestamp() * 1000)
-    
-    # 提取纯文本和嵌入的图片 keys (调用 calculator 中的静态方法)
-    text_content, embedded_image_keys = MetricsCalculator.extract_text_from_content(message.content)
-    
-    # 获取附件内容（下载并上传到云空间）
+def _process_message_attachments(message, message_id: str) -> list:
+    """
+    处理消息附件（图片和文件）
+
+    Args:
+        message: 消息对象
+        message_id: 消息ID
+
+    Returns:
+        file_tokens列表，包含上传后的附件信息
+    """
     file_tokens = []
-    
-    # 处理嵌入在富文本中的图片
+
+    # 提取纯文本和嵌入的图片 keys
+    text_content, embedded_image_keys = MetricsCalculator.extract_text_from_content(message.content)
+
+    # 处理富文本中嵌入的图片
     if embedded_image_keys:
         for img_key in embedded_image_keys:
             print(f"  > [附件] 正在处理富文本嵌入图片: {img_key}")
-            file_bin = archive_storage.download_message_resource(message.message_id, img_key, "image")
+            file_bin = archive_storage.download_message_resource(message_id, img_key, "image")
             if file_bin:
                 attachment_obj = archive_storage.upload_file_to_drive(file_bin, f"{img_key}.png")
                 if attachment_obj:
                     file_tokens.append(attachment_obj)
-    
-    # 处理独立的图片/文件消息
+
+    # 解析content获取文件信息
     try:
         content_obj = json.loads(message.content) if isinstance(message.content, str) else message.content
-    except:
+    except (json.JSONDecodeError, ValueError):
         content_obj = {}
-    
+
+    # 处理独立的图片消息
     if message.message_type == "image":
         file_key = content_obj.get("image_key")
         if file_key:
             print(f"  > [附件] 正在处理图片消息: {file_key}")
-            file_bin = archive_storage.download_message_resource(message.message_id, file_key, "image")
+            file_bin = archive_storage.download_message_resource(message_id, file_key, "image")
             if file_bin:
                 attachment_obj = archive_storage.upload_file_to_drive(file_bin, f"{file_key}.png")
                 if attachment_obj:
                     file_tokens.append(attachment_obj)
+
+    # 处理文件消息
     elif message.message_type == "file":
         file_key = content_obj.get("file_key")
         file_name = content_obj.get("file_name", "file")
         if file_key:
             print(f"  > [附件] 正在处理文件消息: {file_name}")
-            file_bin = archive_storage.download_message_resource(message.message_id, file_key, "file")
+            file_bin = archive_storage.download_message_resource(message_id, file_key, "file")
             if file_bin:
                 attachment_obj = archive_storage.upload_file_to_drive(file_bin, file_name)
                 if attachment_obj:
                     file_tokens.append(attachment_obj)
-    
-    # 构建消息链接（飞书客户端深链接）- URL 字段需要对象格式
-    message_link_url = f"https://applink.feishu.cn/client/chat/open?openChatId={CHAT_ID}&messageId={message.message_id}"
+
+    return file_tokens, text_content
+
+
+def _build_archive_fields(message, sender_id: str, user_name: str,
+                          text_content: str, file_tokens: list,
+                          month_str: str, timestamp_ms: int) -> dict:
+    """
+    构建消息归档字段
+
+    Args:
+        message: 消息对象
+        sender_id: 发送者ID
+        user_name: 发送者姓名
+        text_content: 消息文本内容
+        file_tokens: 附件列表
+        month_str: 统计月份
+        timestamp_ms: 时间戳（毫秒）
+
+    Returns:
+        归档字段字典
+    """
+    # 构建消息链接
     message_link = {
-        "link": message_link_url,
+        "link": f"https://applink.feishu.cn/client/chat/open?openChatId={CHAT_ID}&messageId={message.message_id}",
         "text": "查看消息"
     }
-    
-    # 1. 保存到消息归档表
+
     archive_fields = {
         "消息ID": message.message_id,
         "话题ID": message.root_id or message.message_id,
@@ -250,54 +246,72 @@ def archive_message_logic(message, sender_id, user_name):
         "统计月份": month_str,
         "消息链接": message_link,
     }
-    
-    # 只有当确实有附件时才添加该字段（存储 Drive API 返回的 file_token 列表）
+
+    # 添加附件信息
     if file_tokens:
         archive_fields["附件信息"] = file_tokens
-    
-    # 处理 @ 的人
+
+    # 添加@的人
     if message.mentions:
         mention_names = [m.name for m in message.mentions]
         archive_fields["@的人"] = ", ".join(mention_names)
-        
-    archive_storage.save_message(archive_fields)
-    
-    # 2. 更新或创建话题汇总
-    root_id = message.root_id or message.message_id
+
+    return archive_fields
+
+
+def _get_topic_status(last_reply_time_ms: int) -> str:
+    """
+    根据最后回复时间判断话题状态
+
+    Args:
+        last_reply_time_ms: 最后回复时间戳（毫秒）
+
+    Returns:
+        话题状态：活跃/沉默/冷却
+    """
+    if not last_reply_time_ms:
+        return "活跃"
+
+    now = datetime.now()
+    last_reply_time = datetime.fromtimestamp(last_reply_time_ms / 1000)
+    days_since_last_reply = (now - last_reply_time).days
+
+    if days_since_last_reply <= TOPIC_ACTIVE_DAYS:
+        return "活跃"
+    elif days_since_last_reply <= TOPIC_SILENT_DAYS:
+        return "沉默"
+    else:
+        return "冷却"
+
+
+def _update_topic_summary(message, sender_id: str, user_name: str,
+                          text_content: str, root_id: str,
+                          month_str: str, timestamp_ms: int):
+    """
+    更新或创建话题汇总
+
+    Args:
+        message: 消息对象
+        sender_id: 发送者ID
+        user_name: 发送者姓名
+        text_content: 消息文本内容
+        root_id: 话题根消息ID
+        month_str: 统计月份
+        timestamp_ms: 时间戳（毫秒）
+    """
     topic_record = archive_storage.get_topic_by_id(root_id)
-    
-    # 构建话题链接（话题的第一条消息链接）- URL 字段需要对象格式
-    topic_link_url = f"https://applink.feishu.cn/client/chat/open?openChatId={CHAT_ID}&messageId={root_id}"
+
+    # 构建话题链接
     topic_link = {
-        "link": topic_link_url,
+        "link": f"https://applink.feishu.cn/client/chat/open?openChatId={CHAT_ID}&messageId={root_id}",
         "text": "查看话题"
     }
-    
-    # 计算话题状态（基于最后回复时间）
-    def get_topic_status(last_reply_time_ms):
-        """根据最后回复时间判断话题状态
-        - 活跃：7天内有回复
-        - 沉默：7-30天内有回复
-        - 冷却：超过30天无回复
-        """
-        if not last_reply_time_ms:
-            return "活跃"
-        
-        last_reply_time = datetime.fromtimestamp(last_reply_time_ms / 1000)
-        days_since_last_reply = (now - last_reply_time).days
-        
-        if days_since_last_reply <= 7:
-            return "活跃"
-        elif days_since_last_reply <= 30:
-            return "沉默"
-        else:
-            return "冷却"
-    
+
     if not topic_record:
         # 创建新话题
         summary_fields = {
             "话题ID": root_id,
-            "话题标题": text_content,  # 保存完整内容,不截断
+            "话题标题": text_content,
             "发起人": [{"id": sender_id}],
             "发起人姓名": user_name,
             "创建时间": timestamp_ms,
@@ -305,7 +319,7 @@ def archive_message_logic(message, sender_id, user_name):
             "回复数": 0 if not message.root_id else 1,
             "参与人数": 1,
             "参与者": user_name,
-            "话题状态": "活跃",  # 新话题默认为活跃
+            "话题状态": "活跃",
             "统计月份": month_str,
             "话题链接": topic_link
         }
@@ -313,36 +327,29 @@ def archive_message_logic(message, sender_id, user_name):
     else:
         # 更新已有话题
         old_fields = topic_record['fields']
-        
-        # 更新参与者列表（兼容各种格式）
+
+        # 更新参与者列表
         participants = set()
         participants_raw = old_fields.get("参与者", "")
-        
+
         if isinstance(participants_raw, list):
-            # 如果是列表（可能是富文本格式）
             for item in participants_raw:
                 if isinstance(item, dict):
-                    # 富文本格式: {'text': '欧欧', 'type': 'text'}
                     name = item.get('text', '')
                     if name:
                         participants.add(name)
-                elif isinstance(item, str):
-                    # 纯字符串
-                    if item:
-                        participants.add(item)
-        elif isinstance(participants_raw, str):
-            # 如果是字符串
-            if participants_raw:
-                for name in participants_raw.split(", "):
-                    if name.strip():
-                        participants.add(name.strip())
-        
-        # 添加当前用户
+                elif isinstance(item, str) and item:
+                    participants.add(item)
+        elif isinstance(participants_raw, str) and participants_raw:
+            for name in participants_raw.split(", "):
+                if name.strip():
+                    participants.add(name.strip())
+
         participants.add(user_name)
-        
-        # 计算话题状态（当前消息就是最新回复）
-        topic_status = get_topic_status(timestamp_ms)
-        
+
+        # 计算话题状态
+        topic_status = _get_topic_status(timestamp_ms)
+
         summary_fields = {
             "最后回复时间": timestamp_ms,
             "回复数": int(old_fields.get("回复数", 0)) + 1,
@@ -351,6 +358,43 @@ def archive_message_logic(message, sender_id, user_name):
             "话题状态": topic_status
         }
         archive_storage.update_or_create_topic(root_id, summary_fields, is_new=False)
+
+
+def archive_message_logic(message, sender_id, user_name):
+    """
+    处理消息归档和话题汇总（重构版）
+
+    将消息保存到归档表，并更新话题汇总信息
+
+    Args:
+        message: 消息对象
+        sender_id: 发送者ID
+        user_name: 发送者姓名
+    """
+    now = datetime.now()
+    month_str = now.strftime("%Y-%m")
+    timestamp_ms = int(now.timestamp() * 1000)
+
+    # 1. 处理附件
+    file_tokens, text_content = _process_message_attachments(message, message.message_id)
+
+    # 2. 构建归档字段
+    archive_fields = _build_archive_fields(
+        message, sender_id, user_name,
+        text_content, file_tokens,
+        month_str, timestamp_ms
+    )
+
+    # 3. 保存到消息归档表
+    archive_storage.save_message(archive_fields)
+
+    # 4. 更新话题汇总
+    root_id = message.root_id or message.message_id
+    _update_topic_summary(
+        message, sender_id, user_name,
+        text_content, root_id,
+        month_str, timestamp_ms
+    )
 
 
 def do_p2_im_message_reaction_created_v1(data: lark.im.v1.P2ImMessageReactionCreatedV1) -> None:

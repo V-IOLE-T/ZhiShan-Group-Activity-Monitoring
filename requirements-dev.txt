@@ -1,0 +1,26 @@
+# 开发环境依赖
+# 安装命令: pip install -r requirements-dev.txt
+
+# 代码格式化
+black==24.1.1
+isort==5.13.2
+
+# 代码检查
+flake8==7.0.0
+flake8-docstrings==1.7.0
+flake8-bugbear==24.1.17
+
+# 类型检查
+mypy==1.8.0
+types-requests==2.31.0.10
+
+# 测试工具
+pytest==7.4.4
+pytest-cov==4.1.0
+pytest-mock==3.12.0
+coverage==7.4.0
+
+# 项目依赖（从requirements.txt）
+requests>=2.31.0
+python-dotenv>=1.0.0
+lark>=1.1.9

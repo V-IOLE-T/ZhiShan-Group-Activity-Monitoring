@@ -7,6 +7,7 @@ from calculator import MetricsCalculator
 from storage import BitableStorage
 from collector import MessageCollector
 from datetime import datetime
+from utils import LRUCache
 
 app = FastAPI()
 
@@ -16,17 +17,18 @@ storage = BitableStorage(auth)
 collector = MessageCollector(auth)
 calculator = MetricsCalculator([])
 
-# 用于去重的简单缓存（记录 event_id）
-processed_events = set()
+# 用于去重的缓存（使用LRU防止内存泄漏）
+processed_events = LRUCache(capacity=1000)
 
 # 用户昵称缓存（避免频繁请求通讯录/群成员接口）
-user_name_cache = {}
+user_name_cache = LRUCache(capacity=500)
 
 @app.post("/webhook")
 async def webhook_handler(request: Request):
     try:
         data = await request.json()
-    except:
+    except (json.JSONDecodeError, ValueError) as e:
+        print(f"❌ 解析请求JSON失败: {e}")
         return {"error": "invalid json"}
 
     # 1. 飞书 URL 验证请求
@@ -41,13 +43,11 @@ async def webhook_handler(request: Request):
     if not event_id:
         return {"status": "no event_id"}
 
-    # 重复事件检查
+    # 重复事件检查（LRU会自动管理容量）
     if event_id in processed_events:
         return {"status": "already processed"}
-    
-    processed_events.add(event_id)
-    if len(processed_events) > 1000:
-        processed_events.clear() # 简单清理
+
+    processed_events.set(event_id, True)
 
     # 3. 处理接收消息事件
     if event_type == "im.message.receive_v1":
@@ -65,12 +65,13 @@ async def webhook_handler(request: Request):
         char_count = calculator._extract_text_length(content_str)
         
         # 确定用户昵称（优先使用缓存，不存在则更新缓存）
-        if sender_id not in user_name_cache:
+        user_name = user_name_cache.get(sender_id)
+        if not user_name:
             print(f"正在为用户 {sender_id} 更新昵称缓存...")
             all_names = collector.get_user_names([sender_id])
-            user_name_cache.update(all_names)
-        
-        user_name = user_name_cache.get(sender_id, sender_id)
+            for uid, name in all_names.items():
+                user_name_cache.set(uid, name)
+            user_name = user_name_cache.get(sender_id, sender_id)
 
         # 构建指标增量
         metrics_delta = {

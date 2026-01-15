@@ -1,5 +1,6 @@
 import json
 import re
+from config import ACTIVITY_WEIGHTS
 
 class MetricsCalculator:
     def __init__(self, messages, user_names=None):
@@ -78,13 +79,14 @@ class MetricsCalculator:
                 if is_topic:
                     metrics[sender_id]['topic_initiated'] += 1
         
+        # 计算活跃度分数（使用配置文件中的权重）
         for user_id, data in metrics.items():
             score = (
-                data['message_count'] * 1.0 +
-                data['char_count'] * 0.01 +
-                data['reply_received'] * 1.5 +
-                data['mention_received'] * 1.5 +
-                data['topic_initiated'] * 1.0
+                data['message_count'] * ACTIVITY_WEIGHTS['message_count'] +
+                data['char_count'] * ACTIVITY_WEIGHTS['char_count'] +
+                data['reply_received'] * ACTIVITY_WEIGHTS['reply_received'] +
+                data['mention_received'] * ACTIVITY_WEIGHTS['mention_received'] +
+                data['topic_initiated'] * ACTIVITY_WEIGHTS['topic_initiated']
             )
             metrics[user_id]['score'] = round(score, 2)
         
@@ -119,7 +121,8 @@ class MetricsCalculator:
                     try:
                         inner = json.loads(text)
                         return inner.get('text', text), []
-                    except:
+                    except (json.JSONDecodeError, ValueError):
+                        # 嵌套JSON解析失败，返回原始文本
                         pass
                 return text, []
             

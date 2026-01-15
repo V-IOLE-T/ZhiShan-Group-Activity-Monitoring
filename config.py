@@ -1,4 +1,18 @@
-"""配置文件 - 统一管理所有配置参数"""
+"""
+配置文件 - 统一管理所有配置参数
+
+本模块集中管理项目的所有配置常量，包括：
+- 缓存配置
+- API限流配置
+- 消息采集配置
+- 活跃度权重配置
+- 话题状态时间阈值
+- Token配置
+- API超时配置
+
+修改配置后会影响整个应用，建议在开发环境测试后再应用到生产环境
+"""
+from typing import Dict
 
 # ========== 缓存配置 ==========
 CACHE_USER_NAME_SIZE = 500  # 用户名缓存容量
@@ -16,11 +30,13 @@ MAX_MESSAGES_PER_FETCH = 5000  # 单次最多获取消息数
 MAX_PAGES_PER_FETCH = 100  # 单次最多翻页数
 
 # ========== 活跃度权重配置 ==========
-ACTIVITY_WEIGHTS = {
+# 用于计算活跃度分数的各项指标权重
+# 公式: score = message_count * 1.0 + char_count * 0.01 + reply_received * 1.5 + ...
+ACTIVITY_WEIGHTS: Dict[str, float] = {
     'message_count': 1.0,      # 发言次数权重
-    'char_count': 0.01,        # 发言字数权重
-    'reply_received': 1.5,     # 被回复数权重
-    'mention_received': 1.5,   # 被@次数权重
+    'char_count': 0.01,        # 发言字数权重（避免刷屏，权重较小）
+    'reply_received': 1.5,     # 被回复数权重（内容质量高）
+    'mention_received': 1.5,   # 被@次数权重（有影响力）
     'topic_initiated': 1.0,    # 发起话题数权重
     'reaction_given': 1.0,     # 点赞数权重
     'reaction_received': 1.0   # 被点赞数权重

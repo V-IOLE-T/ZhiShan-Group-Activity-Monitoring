@@ -1,21 +1,76 @@
+"""
+消息采集模块
+
+负责从飞书API获取群聊消息和用户信息
+支持分页、时间过滤和自动限流
+"""
 import requests
 import time
 import os
 from datetime import datetime, timedelta
+from typing import List, Dict, Optional, Any
 from dotenv import load_dotenv
 from config import MAX_MESSAGES_PER_FETCH, MAX_PAGES_PER_FETCH, PAGE_SLEEP_TIME, API_TIMEOUT
 from rate_limiter import with_rate_limit
 
 load_dotenv()
 
+
 class MessageCollector:
-    def __init__(self, auth):
+    """
+    消息采集器
+
+    从飞书API获取群聊消息列表和用户信息
+
+    Attributes:
+        auth: FeishuAuth认证实例
+        chat_id: 要监控的群聊ID
+
+    Example:
+        >>> from auth import FeishuAuth
+        >>> auth = FeishuAuth()
+        >>> collector = MessageCollector(auth)
+        >>> messages = collector.get_messages(hours=1)
+        >>> print(f"采集到 {len(messages)} 条消息")
+    """
+
+    def __init__(self, auth) -> None:
+        """
+        初始化消息采集器
+
+        Args:
+            auth: FeishuAuth认证实例
+
+        Raises:
+            ValueError: 当CHAT_ID未配置时（在首次调用API时抛出）
+        """
         self.auth = auth
-        self.chat_id = os.getenv('CHAT_ID')
-    
+        self.chat_id: Optional[str] = os.getenv('CHAT_ID')
+
     @with_rate_limit
-    def get_messages(self, hours=1):
-        """获取消息，添加安全限制防止无限循环和内存溢出"""
+    def get_messages(self, hours: int = 1) -> List[Dict[str, Any]]:
+        """
+        获取指定时间范围内的群聊消息
+
+        支持分页获取，自动过滤时间范围，防止无限循环和内存溢出
+
+        Args:
+            hours: 获取最近N小时的消息，默认1小时
+
+        Returns:
+            消息列表，每条消息为字典格式
+
+        Note:
+            - 最多获取MAX_MESSAGES_PER_FETCH条消息（默认5000条）
+            - 最多翻MAX_PAGES_PER_FETCH页（默认100页）
+            - 自动应用速率限制
+
+        Example:
+            >>> collector = MessageCollector(auth)
+            >>> messages = collector.get_messages(hours=24)
+            >>> for msg in messages:
+            ...     print(msg.get('message_id'))
+        """
         url = "https://open.feishu.cn/open-apis/im/v1/messages"
         
         # 计算时间阈值（毫秒）
@@ -102,8 +157,30 @@ class MessageCollector:
         return all_messages
 
     @with_rate_limit
-    def get_user_names(self, user_ids):
-        """获取群聊成员在群里的昵称（备注）"""
+    def get_user_names(self, user_ids: List[str]) -> Dict[str, str]:
+        """
+        获取群聊成员在群里的昵称（备注名）
+
+        批量获取用户在群内的显示名称，优先返回群内备注名
+
+        Args:
+            user_ids: 用户open_id列表
+
+        Returns:
+            用户ID到昵称的映射字典 {open_id: name}
+
+        Note:
+            - 如果用户不在群内，该用户不会出现在结果中
+            - 优先使用群内备注名，没有则使用真实姓名
+            - 自动分页获取所有群成员
+
+        Example:
+            >>> collector = MessageCollector(auth)
+            >>> user_ids = ['ou_123', 'ou_456']
+            >>> names = collector.get_user_names(user_ids)
+            >>> print(names)
+            {'ou_123': '张三', 'ou_456': '李四'}
+        """
         if not user_ids:
             return {}
         
@@ -150,8 +227,29 @@ class MessageCollector:
         return user_names
 
     @with_rate_limit
-    def get_message_sender(self, message_id):
-        """获取指定消息的发送者 ID"""
+    def get_message_sender(self, message_id: str) -> Optional[str]:
+        """
+        获取指定消息的发送者ID
+
+        根据消息ID查询消息详情，提取发送者open_id
+
+        Args:
+            message_id: 消息ID
+
+        Returns:
+            发送者的open_id，如果获取失败返回None
+
+        Note:
+            - 需要im:message权限
+            - 消息可能已被删除或撤回
+            - 自动应用速率限制
+
+        Example:
+            >>> collector = MessageCollector(auth)
+            >>> sender_id = collector.get_message_sender('om_xxx')
+            >>> print(sender_id)
+            'ou_123'
+        """
         if not message_id:
             return None
             

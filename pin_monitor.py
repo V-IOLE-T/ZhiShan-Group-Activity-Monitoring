@@ -3,38 +3,12 @@ import json
 import time
 import requests
 import threading
-from collections import OrderedDict
 from datetime import datetime
 from dotenv import load_dotenv
 from rate_limiter import with_rate_limit
+from utils import ThreadSafeLRUCache
 
 load_dotenv()
-
-
-class LRUCache:
-    """简单的LRU缓存实现，防止内存泄漏"""
-    def __init__(self, capacity=500):
-        self.cache = OrderedDict()
-        self.capacity = capacity
-
-    def get(self, key, default=None):
-        if key not in self.cache:
-            return default
-        self.cache.move_to_end(key)
-        return self.cache[key]
-
-    def set(self, key, value):
-        if key in self.cache:
-            self.cache.move_to_end(key)
-        self.cache[key] = value
-        if len(self.cache) > self.capacity:
-            self.cache.popitem(last=False)
-
-    def __contains__(self, key):
-        return key in self.cache
-
-    def __len__(self):
-        return len(self.cache)
 
 
 class PinMonitor:
@@ -57,12 +31,12 @@ class PinMonitor:
         
         # 缓存当前Pin消息ID列表
         self.current_pin_ids = set()
-        
-        # 缓存Pin消息详情(避免重复获取)
-        self.pin_details_cache = LRUCache(capacity=200)
-        
-        # 用户昵称缓存
-        self.user_name_cache = LRUCache(capacity=500)
+
+        # 缓存Pin消息详情(避免重复获取) - 使用线程安全缓存
+        self.pin_details_cache = ThreadSafeLRUCache(capacity=200)
+
+        # 用户昵称缓存 - 使用线程安全缓存
+        self.user_name_cache = ThreadSafeLRUCache(capacity=500)
         
         # 是否为首次运行(避免首次启动时对所有现有Pin发送提醒)
         self.is_first_run = True
@@ -160,7 +134,8 @@ class PinMonitor:
                 # 解析content获取文件信息
                 try:
                     content_obj = json.loads(content_str) if isinstance(content_str, str) else content_str
-                except:
+                except (json.JSONDecodeError, ValueError):
+                    # 内容解析失败，使用空字典
                     content_obj = {}
                 
                 details = {
