@@ -1,5 +1,6 @@
 import os
 import json
+from collections import OrderedDict
 from dotenv import load_dotenv
 import lark_oapi as lark
 from lark_oapi.api.im.v1 import *
@@ -8,8 +9,9 @@ from datetime import datetime
 # 导入现有模块
 from auth import FeishuAuth
 from calculator import MetricsCalculator
-from storage import BitableStorage
+from storage import BitableStorage, MessageArchiveStorage
 from collector import MessageCollector
+from config import CACHE_USER_NAME_SIZE, CACHE_EVENT_SIZE, TOPIC_ACTIVE_DAYS, TOPIC_SILENT_DAYS
 
 load_dotenv()
 
@@ -21,25 +23,61 @@ CHAT_ID = os.getenv('CHAT_ID')
 # 初始化组件
 auth = FeishuAuth()
 storage = BitableStorage(auth)
+archive_storage = MessageArchiveStorage(auth)
 collector = MessageCollector(auth)
 calculator = MetricsCalculator([])
 
-# 用户昵称缓存
-user_name_cache = {}
 
-# 事件去重缓存
-processed_events = set()
+class LRUCache:
+    """简单的LRU缓存实现，防止内存泄漏"""
+    def __init__(self, capacity=500):
+        self.cache = OrderedDict()
+        self.capacity = capacity
+    
+    def get(self, key, default=None):
+        """获取缓存值"""
+        if key in self.cache:
+            # 移到最后（最近使用）
+            self.cache.move_to_end(key)
+            return self.cache[key]
+        return default
+    
+    def set(self, key, value):
+        """设置缓存值"""
+        if key in self.cache:
+            self.cache.move_to_end(key)
+        self.cache[key] = value
+        # 超出容量时删除最久未使用的项
+        if len(self.cache) > self.capacity:
+            self.cache.popitem(last=False)
+    
+    def __contains__(self, key):
+        return key in self.cache
+    
+    def __len__(self):
+        return len(self.cache)
+
+
+# 用户昵称缓存 - 使用LRU防止内存泄漏
+user_name_cache = LRUCache(capacity=CACHE_USER_NAME_SIZE)
+
+# 事件去重缓存 - 使用LRU防止内存泄漏
+processed_events = LRUCache(capacity=CACHE_EVENT_SIZE)
 
 def get_cached_nickname(user_id):
     """获取缓存的昵称，如果不存在则从 API 获取并更新缓存"""
     if not user_id:
         return user_id
         
-    if user_id not in user_name_cache:
-        print(f"正在获取用户 {user_id} 的群备注...")
-        names = collector.get_user_names([user_id])
-        if names:
-            user_name_cache.update(names)
+    cached_name = user_name_cache.get(user_id)
+    if cached_name:
+        return cached_name
+    
+    print(f"正在获取用户 {user_id} 的群备注...")
+    names = collector.get_user_names([user_id])
+    if names:
+        for uid, name in names.items():
+            user_name_cache.set(uid, name)
     
     return user_name_cache.get(user_id, user_id)
 
@@ -49,11 +87,7 @@ def do_p2_im_message_receive_v1(data: lark.im.v1.P2ImMessageReceiveV1) -> None:
     event_id = data.header.event_id
     if event_id in processed_events:
         return
-    processed_events.add(event_id)
-    
-    # 限制去重缓存大小
-    if len(processed_events) > 1000:
-        processed_events.clear()
+    processed_events.set(event_id, True)  # LRU会自动管理容量，无需手动清理
 
     event = data.event
     message = event.message
@@ -137,8 +171,186 @@ def do_p2_im_message_receive_v1(data: lark.im.v1.P2ImMessageReceiveV1) -> None:
                     storage.update_or_create_record(mentioned_id, mentioned_name, {"mention_received": 1})
         
         print("✅ 实时同步圆满成功")
+        
+        # 8. 归档消息到新表
+        try:
+            archive_message_logic(message, sender_id, user_name)
+        except Exception as e:
+            print(f"  > [归档] ⚠️ 归档逻辑执行失败: {e}")
+
     except Exception as e:
         print(f"❌ 实时更新失败: {e}")
+
+def archive_message_logic(message, sender_id, user_name):
+    """处理消息归档和话题汇总的具体逻辑"""
+    now = datetime.now()
+    month_str = now.strftime("%Y-%m")
+    timestamp_ms = int(now.timestamp() * 1000)
+    
+    # 提取纯文本和嵌入的图片 keys (调用 calculator 中的静态方法)
+    text_content, embedded_image_keys = MetricsCalculator.extract_text_from_content(message.content)
+    
+    # 获取附件内容（下载并上传到云空间）
+    file_tokens = []
+    
+    # 处理嵌入在富文本中的图片
+    if embedded_image_keys:
+        for img_key in embedded_image_keys:
+            print(f"  > [附件] 正在处理富文本嵌入图片: {img_key}")
+            file_bin = archive_storage.download_message_resource(message.message_id, img_key, "image")
+            if file_bin:
+                attachment_obj = archive_storage.upload_file_to_drive(file_bin, f"{img_key}.png")
+                if attachment_obj:
+                    file_tokens.append(attachment_obj)
+    
+    # 处理独立的图片/文件消息
+    try:
+        content_obj = json.loads(message.content) if isinstance(message.content, str) else message.content
+    except:
+        content_obj = {}
+    
+    if message.message_type == "image":
+        file_key = content_obj.get("image_key")
+        if file_key:
+            print(f"  > [附件] 正在处理图片消息: {file_key}")
+            file_bin = archive_storage.download_message_resource(message.message_id, file_key, "image")
+            if file_bin:
+                attachment_obj = archive_storage.upload_file_to_drive(file_bin, f"{file_key}.png")
+                if attachment_obj:
+                    file_tokens.append(attachment_obj)
+    elif message.message_type == "file":
+        file_key = content_obj.get("file_key")
+        file_name = content_obj.get("file_name", "file")
+        if file_key:
+            print(f"  > [附件] 正在处理文件消息: {file_name}")
+            file_bin = archive_storage.download_message_resource(message.message_id, file_key, "file")
+            if file_bin:
+                attachment_obj = archive_storage.upload_file_to_drive(file_bin, file_name)
+                if attachment_obj:
+                    file_tokens.append(attachment_obj)
+    
+    # 构建消息链接（飞书客户端深链接）- URL 字段需要对象格式
+    message_link_url = f"https://applink.feishu.cn/client/chat/open?openChatId={CHAT_ID}&messageId={message.message_id}"
+    message_link = {
+        "link": message_link_url,
+        "text": "查看消息"
+    }
+    
+    # 1. 保存到消息归档表
+    archive_fields = {
+        "消息ID": message.message_id,
+        "话题ID": message.root_id or message.message_id,
+        "父消息ID": message.parent_id or "",
+        "发送者": [{"id": sender_id}],
+        "发送者姓名": user_name,
+        "消息内容": text_content,
+        "消息类型": message.message_type,
+        "发送时间": timestamp_ms,
+        "统计月份": month_str,
+        "消息链接": message_link,
+    }
+    
+    # 只有当确实有附件时才添加该字段（存储 Drive API 返回的 file_token 列表）
+    if file_tokens:
+        archive_fields["附件信息"] = file_tokens
+    
+    # 处理 @ 的人
+    if message.mentions:
+        mention_names = [m.name for m in message.mentions]
+        archive_fields["@的人"] = ", ".join(mention_names)
+        
+    archive_storage.save_message(archive_fields)
+    
+    # 2. 更新或创建话题汇总
+    root_id = message.root_id or message.message_id
+    topic_record = archive_storage.get_topic_by_id(root_id)
+    
+    # 构建话题链接（话题的第一条消息链接）- URL 字段需要对象格式
+    topic_link_url = f"https://applink.feishu.cn/client/chat/open?openChatId={CHAT_ID}&messageId={root_id}"
+    topic_link = {
+        "link": topic_link_url,
+        "text": "查看话题"
+    }
+    
+    # 计算话题状态（基于最后回复时间）
+    def get_topic_status(last_reply_time_ms):
+        """根据最后回复时间判断话题状态
+        - 活跃：7天内有回复
+        - 沉默：7-30天内有回复
+        - 冷却：超过30天无回复
+        """
+        if not last_reply_time_ms:
+            return "活跃"
+        
+        last_reply_time = datetime.fromtimestamp(last_reply_time_ms / 1000)
+        days_since_last_reply = (now - last_reply_time).days
+        
+        if days_since_last_reply <= 7:
+            return "活跃"
+        elif days_since_last_reply <= 30:
+            return "沉默"
+        else:
+            return "冷却"
+    
+    if not topic_record:
+        # 创建新话题
+        summary_fields = {
+            "话题ID": root_id,
+            "话题标题": text_content[:50],
+            "发起人": [{"id": sender_id}],
+            "发起人姓名": user_name,
+            "创建时间": timestamp_ms,
+            "最后回复时间": timestamp_ms,
+            "回复数": 0 if not message.root_id else 1,
+            "参与人数": 1,
+            "参与者": user_name,
+            "话题状态": "活跃",  # 新话题默认为活跃
+            "统计月份": month_str,
+            "话题链接": topic_link
+        }
+        archive_storage.update_or_create_topic(root_id, summary_fields, is_new=True)
+    else:
+        # 更新已有话题
+        old_fields = topic_record['fields']
+        
+        # 更新参与者列表（兼容各种格式）
+        participants = set()
+        participants_raw = old_fields.get("参与者", "")
+        
+        if isinstance(participants_raw, list):
+            # 如果是列表（可能是富文本格式）
+            for item in participants_raw:
+                if isinstance(item, dict):
+                    # 富文本格式: {'text': '欧欧', 'type': 'text'}
+                    name = item.get('text', '')
+                    if name:
+                        participants.add(name)
+                elif isinstance(item, str):
+                    # 纯字符串
+                    if item:
+                        participants.add(item)
+        elif isinstance(participants_raw, str):
+            # 如果是字符串
+            if participants_raw:
+                for name in participants_raw.split(", "):
+                    if name.strip():
+                        participants.add(name.strip())
+        
+        # 添加当前用户
+        participants.add(user_name)
+        
+        # 计算话题状态（当前消息就是最新回复）
+        topic_status = get_topic_status(timestamp_ms)
+        
+        summary_fields = {
+            "最后回复时间": timestamp_ms,
+            "回复数": int(old_fields.get("回复数", 0)) + 1,
+            "参与人数": len(participants),
+            "参与者": ", ".join(participants),
+            "话题状态": topic_status
+        }
+        archive_storage.update_or_create_topic(root_id, summary_fields, is_new=False)
+
 
 def do_p2_im_message_reaction_created_v1(data: lark.im.v1.P2ImMessageReactionCreatedV1) -> None:
     """处理表情回复事件（点赞）"""
@@ -146,11 +358,7 @@ def do_p2_im_message_reaction_created_v1(data: lark.im.v1.P2ImMessageReactionCre
     event_id = data.header.event_id
     if event_id in processed_events:
         return
-    processed_events.add(event_id)
-    
-    # 限制去重缓存大小
-    if len(processed_events) > 1000:
-        processed_events.clear()
+    processed_events.set(event_id, True)  # LRU会自动管理容量，无需手动清理
     
     event = data.event
     
@@ -205,6 +413,7 @@ def do_p2_im_message_reaction_created_v1(data: lark.im.v1.P2ImMessageReactionCre
         
     except Exception as e:
         print(f"❌ 表情回复统计失败: {e}")
+
 
 # 初始化事件处理器
 event_handler = lark.EventDispatcherHandler.builder("", "") \

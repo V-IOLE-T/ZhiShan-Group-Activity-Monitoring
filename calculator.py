@@ -1,4 +1,3 @@
-from collections import defaultdict
 import json
 import re
 
@@ -92,10 +91,113 @@ class MetricsCalculator:
         return dict(metrics)
     
     def _extract_text_length(self, content):
+        text, _ = self.extract_text_from_content(content)
+        # 移除 @ 标签带来的字数影响
+        text = re.sub(r'@[^ ]+', '', text)
+        return len(text.strip())
+
+    @staticmethod
+    def extract_text_from_content(content):
+        """通用内容提取逻辑，支持 text、post 以及其他复杂类型
+        返回: (text_content, image_keys_list)
+        """
+        if not content:
+            return "", []
+        
         try:
-            content_obj = json.loads(content)
-            text = content_obj.get('text', '')
-            text = re.sub(r'@_user_\w+', '', text)
-            return len(text.strip())
-        except:
-            return 0
+            # 如果 content 是字符串，则解析为字典；如果是字典则直接使用
+            if isinstance(content, str):
+                content_obj = json.loads(content)
+            else:
+                content_obj = content
+            
+            # 1. 尝试直接获取 text 字段 (纯文本消息)
+            if 'text' in content_obj:
+                text = content_obj['text']
+                # 处理被转义的 JSON 文本
+                if isinstance(text, str) and text.startswith('{"text":'):
+                    try:
+                        inner = json.loads(text)
+                        return inner.get('text', text), []
+                    except:
+                        pass
+                return text, []
+            
+            # 2. 处理直接的 post 结构 (title + content 数组)
+            if 'content' in content_obj and isinstance(content_obj['content'], list):
+                text_parts = []
+                image_keys = []
+                
+                # 添加标题(如果有)
+                if content_obj.get('title'):
+                    text_parts.append(content_obj['title'])
+                
+                # 遍历每一行 content
+                for row in content_obj['content']:
+                    if not isinstance(row, list):
+                        continue
+                    row_text = []
+                    for item in row:
+                        if not isinstance(item, dict):
+                            continue
+                        tag = item.get('tag')
+                        if tag in ['text', 'a', 'at']:
+                            text_val = item.get('text', '')
+                            if text_val:
+                                row_text.append(text_val)
+                        elif tag == 'img':
+                            # 提取图片 key
+                            img_key = item.get('image_key')
+                            if img_key:
+                                image_keys.append(img_key)
+                    if row_text:
+                        text_parts.append("".join(row_text))
+                
+                return "\n".join(text_parts), image_keys
+            
+            # 3. 处理标准的 post 结构 (带语言版本)
+            if 'post' in content_obj:
+                post_data = content_obj['post']
+                text_parts = []
+                image_keys = []
+                values_to_check = post_data.values() if isinstance(post_data, dict) else [post_data]
+                
+                for lang_data in values_to_check:
+                    if not isinstance(lang_data, dict):
+                        continue
+                    
+                    if 'title' in lang_data and lang_data['title']:
+                        text_parts.append(lang_data['title'])
+                    
+                    if 'content' in lang_data:
+                        for row in lang_data['content']:
+                            row_text = []
+                            for item in row:
+                                tag = item.get('tag')
+                                if tag in ['text', 'a', 'at']:
+                                    text_parts_in_row = item.get('text', '')
+                                    if text_parts_in_row:
+                                        row_text.append(text_parts_in_row)
+                                elif tag == 'img':
+                                    img_key = item.get('image_key')
+                                    if img_key:
+                                        image_keys.append(img_key)
+                            if row_text:
+                                text_parts.append("".join(row_text))
+                
+                if text_parts or image_keys:
+                    return "\n".join(text_parts), image_keys
+            
+            # 4. 处理其他类型 (image, file, audio 等)
+            for key in ['image_key', 'file_key', 'file_name']:
+                if key in content_obj:
+                    return f"[{key.replace('_', ' ')}: {content_obj[key]}]", []
+            
+            # ⚠️ 兜底逻辑
+            if content_obj:
+                return str(content_obj), []
+            
+            return "", []
+        except Exception:
+            # 如果解析完全失败，返回原始输入
+            return str(content), []

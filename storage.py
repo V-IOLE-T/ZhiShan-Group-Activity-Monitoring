@@ -3,6 +3,8 @@ import time
 import os
 from datetime import datetime
 from dotenv import load_dotenv
+from config import ACTIVITY_WEIGHTS
+from rate_limiter import with_rate_limit
 
 load_dotenv()
 
@@ -12,6 +14,7 @@ class BitableStorage:
         self.app_token = os.getenv('BITABLE_APP_TOKEN')
         self.table_id = os.getenv('BITABLE_TABLE_ID')
     
+    @with_rate_limit
     def get_record_by_user_month(self, user_id, month):
         """根据用户ID和月份查找记录"""
         url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{self.app_token}/tables/{self.table_id}/records/search"
@@ -59,6 +62,7 @@ class BitableStorage:
             print(f"❌ 查找记录出错: {e}")
             return None
 
+    @with_rate_limit
     def update_or_create_record(self, user_id, user_name, metrics_delta):
         """按月实时更新或创建记录"""
         month = datetime.now().strftime("%Y-%m")
@@ -85,15 +89,15 @@ class BitableStorage:
                 "点赞数": int(old_fields.get("点赞数", 0)) + metrics_delta.get("reaction_given", 0),
                 "被点赞数": int(old_fields.get("被点赞数", 0)) + metrics_delta.get("reaction_received", 0),
             })
-            # 重新计算分数
+            # 重新计算分数（使用配置文件中的权重）
             score = (
-                fields["发言次数"] * 1.0 +
-                fields["发言字数"] * 0.01 +
-                fields["被回复数"] * 1.5 +
-                fields["单独被@次数"] * 1.5 +
-                fields["发起话题数"] * 1.0 +
-                fields["点赞数"] * 1.0 +
-                fields["被点赞数"] * 1.0
+                fields["发言次数"] * ACTIVITY_WEIGHTS['message_count'] +
+                fields["发言字数"] * ACTIVITY_WEIGHTS['char_count'] +
+                fields["被回复数"] * ACTIVITY_WEIGHTS['reply_received'] +
+                fields["单独被@次数"] * ACTIVITY_WEIGHTS['mention_received'] +
+                fields["发起话题数"] * ACTIVITY_WEIGHTS['topic_initiated'] +
+                fields["点赞数"] * ACTIVITY_WEIGHTS['reaction_given'] +
+                fields["被点赞数"] * ACTIVITY_WEIGHTS['reaction_received']
             )
             fields["活跃度分数"] = round(score, 2)
             
@@ -127,13 +131,13 @@ class BitableStorage:
                 "被点赞数": metrics_delta.get("reaction_received", 0),
             })
             score = (
-                fields["发言次数"] * 1.0 +
-                fields["发言字数"] * 0.01 +
-                fields["被回复数"] * 1.5 +
-                fields["单独被@次数"] * 1.5 +
-                fields["发起话题数"] * 1.0 +
-                fields["点赞数"] * 1.0 +
-                fields["被点赞数"] * 1.0
+                fields["发言次数"] * ACTIVITY_WEIGHTS['message_count'] +
+                fields["发言字数"] * ACTIVITY_WEIGHTS['char_count'] +
+                fields["被回复数"] * ACTIVITY_WEIGHTS['reply_received'] +
+                fields["单独被@次数"] * ACTIVITY_WEIGHTS['mention_received'] +
+                fields["发起话题数"] * ACTIVITY_WEIGHTS['topic_initiated'] +
+                fields["点赞数"] * ACTIVITY_WEIGHTS['reaction_given'] +
+                fields["被点赞数"] * ACTIVITY_WEIGHTS['reaction_received']
             )
             fields["活跃度分数"] = round(score, 2)
             
@@ -155,3 +159,142 @@ class BitableStorage:
             except requests.exceptions.RequestException as e:
                 print(f"  > [API] ❌ 请求异常: {e}")
                 raise
+
+class MessageArchiveStorage:
+    def __init__(self, auth):
+        self.auth = auth
+        self.app_token = os.getenv('BITABLE_APP_TOKEN')
+        self.archive_table_id = os.getenv('ARCHIVE_TABLE_ID')
+        self.summary_table_id = os.getenv('SUMMARY_TABLE_ID')
+
+    @with_rate_limit
+    def save_message(self, fields):
+        """保存单条消息到归档表"""
+        url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{self.app_token}/tables/{self.archive_table_id}/records"
+        try:
+            response = requests.post(url, headers=self.auth.get_headers(), json={"fields": fields}, timeout=10)
+            result = response.json()
+            if result.get('code') == 0:
+                print(f"  > [归档] ✅ 消息模型已存入 Bitable")
+                return True
+            else:
+                print(f"  > [归档] ❌ 存储失败: {result}")
+                return False
+        except Exception as e:
+            print(f"  > [归档] ❌ 归档出错: {e}")
+            return False
+
+
+    @with_rate_limit
+    def get_topic_by_id(self, topic_id):
+        """根据话题ID查找话题汇总记录"""
+        url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{self.app_token}/tables/{self.summary_table_id}/records/search"
+        payload = {
+            "filter": {
+                "conjunction": "and",
+                "conditions": [{"field_name": "话题ID", "operator": "is", "value": [topic_id]}]
+            }
+        }
+        try:
+            response = requests.post(url, headers=self.auth.get_headers(), json=payload, timeout=10)
+            data = response.json()
+            if data.get('code') == 0:
+                items = data.get('data', {}).get('items', [])
+                return items[0] if items else None
+        except Exception as e:
+            print(f"  > [汇总] 🔍 查找话题出错: {e}")
+        return None
+
+    @with_rate_limit
+    def update_or_create_topic(self, topic_id, fields, is_new=False):
+        """创建或更新话题汇总记录"""
+        if is_new:
+            url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{self.app_token}/tables/{self.summary_table_id}/records"
+            resp = requests.post(url, headers=self.auth.get_headers(), json={"fields": fields}, timeout=10)
+        else:
+            # 先找到 record_id
+            record = self.get_topic_by_id(topic_id)
+            if not record: return False
+            record_id = record['record_id']
+            url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{self.app_token}/tables/{self.summary_table_id}/records/{record_id}"
+            resp = requests.put(url, headers=self.auth.get_headers(), json={"fields": fields}, timeout=10)
+        
+        result = resp.json()
+        return result.get('code') == 0
+
+
+    def download_message_resource(self, message_id, file_key, resource_type):
+        """从飞书消息中下载资源（图片或文件）"""
+        url = f"https://open.feishu.cn/open-apis/im/v1/messages/{message_id}/resources/{file_key}"
+        params = {"type": resource_type}
+        try:
+            response = requests.get(url, headers=self.auth.get_headers(), params=params, timeout=30)
+            if response.status_code == 200:
+                return response.content
+            else:
+                print(f"  > [附件] ❌ 下载资源失败: {response.status_code}")
+                print(f"  > [附件] 响应: {response.text[:200]}")
+                return None
+        except Exception as e:
+            print(f"  > [附件] ❌ 下载资源出错: {e}")
+            return None
+
+    def upload_file_to_drive(self, file_content, file_name):
+        """将文件作为素材上传到多维表格，获取可用于 Bitable 的 file_token
+        使用素材上传 API: /drive/v1/medias/upload_all
+        """
+        url = "https://open.feishu.cn/open-apis/drive/v1/medias/upload_all"
+        
+        # 准备表单数据 - 上传到多维表格作为素材
+        form_data = {
+            'file_name': file_name,
+            'parent_type': 'bitable_file',  # 上传至多维表格素材
+            'parent_node': self.app_token,  # 目标多维表格的 app_token
+            'size': str(len(file_content))
+        }
+        
+        files = {
+            'file': (file_name, file_content)
+        }
+        
+        # 创建不包含 Content-Type 的 headers
+        upload_headers = {
+            "Authorization": self.auth.get_headers()["Authorization"]
+        }
+        
+        try:
+            response = requests.post(url, headers=upload_headers, data=form_data, files=files, timeout=60)
+            
+            if response.status_code != 200:
+                print(f"  > [附件] ❌ 上传素材 HTTP 错误: {response.status_code}")
+                print(f"  > [附件] 响应内容: {response.text[:200]}")
+                return None
+            
+            try:
+                result = response.json()
+            except Exception as e:
+                print(f"  > [附件] ❌ 解析响应 JSON 失败: {e}")
+                print(f"  > [附件] 原始响应: {response.text[:200]}")
+                return None
+            
+            if result.get('code') == 0:
+                data_obj = result.get('data', {})
+                file_token = data_obj.get('file_token')
+                if file_token:
+                    print(f"  > [附件] ✅ 素材已上传到多维表格: {file_token}")
+                    # 返回 Bitable 附件字段需要的格式
+                    return {
+                        "file_token": file_token,
+                        "name": file_name,
+                        "size": len(file_content),
+                        "type": "file"
+                    }
+                else:
+                    print(f"  > [附件] ❌ 响应中未找到 file_token: {result}")
+                    return None
+            else:
+                print(f"  > [附件] ❌ 上传素材失败: {result}")
+                return None
+        except Exception as e:
+            print(f"  > [附件] ❌ 上传素材出错: {e}")
+            return None
