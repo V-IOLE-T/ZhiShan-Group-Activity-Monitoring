@@ -48,7 +48,14 @@ class MCPClient:
         
         try:
             logger.info(f"🚀 调用 MCP 工具: {tool_name}, 参数: {arguments}")
+            logger.info(f"🌐 请求URL: {self.BASE_URL}")
+            logger.info(f"🔑 使用Token前缀: {token[:20]}...")
+            
             response = requests.post(self.BASE_URL, headers=headers, json=payload, timeout=20)
+            
+            logger.info(f"📡 HTTP状态码: {response.status_code}")
+            logger.info(f"📡 响应内容: {response.text[:500]}...")
+            
             result = response.json()
             
             if "error" in result:
@@ -59,9 +66,19 @@ class MCPClient:
                 logger.error(f"❌ MCP 工具内部错误: {result['result'].get('content')}")
                 return None
                 
+            logger.info(f"✅ MCP 调用成功")
             return result.get("result")
+        except requests.exceptions.Timeout:
+            logger.error(f"❌ MCP 请求超时（20秒）")
+            return None
+        except requests.exceptions.ConnectionError as e:
+            logger.error(f"❌ MCP 连接失败: {str(e)}")
+            logger.error(f"   可能原因: 云服务器无法访问 {self.BASE_URL}")
+            return None
         except Exception as e:
             logger.error(f"❌ MCP 请求异常: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
             return None
 
     def fetch_doc(self, doc_id: str) -> Optional[str]:

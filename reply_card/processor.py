@@ -51,6 +51,13 @@ class DocCardProcessor:
         logger.info(f"⏳ 正在通过 MCP 获取文档 {token} 的内容...")
         doc_content = self.mcp_client.fetch_doc(token)
         
+        # [调试日志] 显示 MCP 返回结果
+        if doc_content:
+            logger.info(f"✅ MCP 成功返回内容，长度: {len(doc_content)} 字符")
+            logger.info(f"📄 内容预览: {doc_content[:200]}...")
+        else:
+            logger.error(f"❌ MCP 返回空内容或调用失败")
+        
         if not doc_content:
             self._send_text_reply(chat_id, "❌ 获取文档内容失败，请检查机器人是否拥有该文档的阅读权限。")
             return False
@@ -61,8 +68,14 @@ class DocCardProcessor:
             doc_title = content_data.get("title", "文档")
             doc_preview = content_data.get("markdown", content_data.get("message", ""))[:500]
             doc_url = f"https://bytedance.feishu.cn/docx/{token}"
+            
+            # [调试日志] 显示解析结果
+            logger.info(f"📋 解析成功 - 标题: {doc_title}")
+            logger.info(f"📋 预览内容长度: {len(doc_preview)} 字符")
+            logger.info(f"📋 预览内容: {doc_preview[:100]}...")
         except Exception as e:
             logger.error(f"❌ 解析文档信息失败: {e}")
+            logger.error(f"原始内容: {doc_content[:200] if doc_content else 'None'}...")
             doc_title = "文档"
             doc_preview = "内容获取失败"
             doc_url = f"https://bytedance.feishu.cn/docx/{token}"
