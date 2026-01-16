@@ -277,16 +277,10 @@ class PinMonitor:
 
         # 检测新增的Pin
         newly_pinned = new_pin_ids - self.current_pin_ids
-        # 检测取消的Pin
-        unpinned = self.current_pin_ids - new_pin_ids
 
         # 处理新增Pin
         for message_id in newly_pinned:
             self._handle_new_pin(message_id, pins)
-
-        # 处理取消Pin
-        for message_id in unpinned:
-            self._handle_unpin(message_id)
 
         # 更新缓存
         self.current_pin_ids = new_pin_ids
@@ -453,26 +447,6 @@ class PinMonitor:
         except Exception as e:
             print(f"  > [Pin附件] ❌ 上传异常: {e}")
             return None
-
-    def _handle_unpin(self, message_id):
-        """处理取消Pin消息（静默删除）"""
-        print(f"[Pin监控] 检测到取消Pin: {message_id}")
-
-        # 从缓存获取消息详情
-        message_details = self.pin_details_cache.get(message_id)
-        if message_details:
-            sender_id = message_details.get("sender_id")
-            sender_name = self.get_user_name(sender_id)
-
-            # 减少被Pin次数
-            if hasattr(self.storage, "decrement_pin_count"):
-                self.storage.decrement_pin_count(sender_id, sender_name)
-
-        # 从归档表删除记录
-        if hasattr(self.storage, "delete_pin_message"):
-            self.storage.delete_pin_message(message_id)
-
-        print(f"[Pin监控] ✅ 已删除Pin归档记录: {message_id}")
 
     def _monitor_loop(self):
         """监控循环（后台线程）"""
