@@ -11,3 +11,11 @@ schedule==1.2.0
 # Webhook 模式 (可选)
 fastapi==0.104.1
 uvicorn==0.24.0
+
+# 图片生成
+Pillow==10.1.0
+pilmoji==2.0.3
+emoji==1.7.0
+
+# 健康检查 (新增)
+Flask==3.0.0
