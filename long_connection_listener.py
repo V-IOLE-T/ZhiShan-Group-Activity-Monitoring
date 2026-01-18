@@ -14,6 +14,8 @@ from config import CACHE_USER_NAME_SIZE, CACHE_EVENT_SIZE, TOPIC_ACTIVE_DAYS, TO
 from pin_monitor import PinMonitor
 from reply_card import DocCardProcessor
 from utils import LRUCache
+from storage import DocxStorage
+from message_renderer import MessageToDocxConverter
 
 load_dotenv()
 
@@ -21,6 +23,7 @@ load_dotenv()
 APP_ID = os.getenv("APP_ID")
 APP_SECRET = os.getenv("APP_SECRET")
 CHAT_ID = os.getenv("CHAT_ID")
+ARCHIVE_DOC_TOKEN = os.getenv("ARCHIVE_DOC_TOKEN")
 
 # 初始化组件
 auth = FeishuAuth()
@@ -29,6 +32,96 @@ archive_storage = MessageArchiveStorage(auth)
 collector = MessageCollector(auth)
 calculator = MetricsCalculator([])
 doc_processor = DocCardProcessor(auth)
+docx_storage = DocxStorage(auth)
+docx_converter = MessageToDocxConverter(docx_storage)
+
+
+# 标签映射配置
+TAG_MAPPING = {
+    "问答": os.getenv("DOC_TOKEN_TAG_QA"),
+    "打卡": os.getenv("DOC_TOKEN_TAG_CHECKIN"),
+    "雅思": os.getenv("DOC_TOKEN_TAG_ENGLISH"), 
+    "英语学习": os.getenv("DOC_TOKEN_TAG_ENGLISH"),
+    "雅思/英语学习": os.getenv("DOC_TOKEN_TAG_ENGLISH"),
+    "AI实用分享": os.getenv("DOC_TOKEN_TAG_AI"),
+    "写作运营": os.getenv("DOC_TOKEN_TAG_OPS"),
+    "沟通场景/技巧": os.getenv("DOC_TOKEN_TAG_COMM"),
+    "个人思考": os.getenv("DOC_TOKEN_TAG_THINKING"),
+    "攻略分享": os.getenv("DOC_TOKEN_TAG_GUIDE"),
+}
+
+def get_target_doc_token(message):
+    """根据消息内容获取目标文档 Token"""
+    
+    # 1. 确定要检查的内容
+    # 如果是回复消息，需要检查根消息的内容来确定归档位置
+    check_content_str = message.content
+    is_reply = bool(message.parent_id or message.root_id)
+    
+    if is_reply and message.root_id:
+        # 尝试获取根消息内容
+        # print(f"  > [路由] 这是一条回复消息，正在获取根消息 {message.root_id} 以确定标签...")
+        try:
+            root_msg = collector.get_message_detail(message.root_id)
+            if root_msg:
+                # root_msg['body']['content'] 是 JSON 字符串
+                check_content_str = root_msg.get("body", {}).get("content", "")
+        except Exception as e:
+            print(f"  > [路由] 获取根消息失败: {e}")
+            
+    # 2. 提取纯文本用于标签匹配
+    # 使用 MetricsCalculator 提取文本，或者简单解析
+    plain_text = ""
+    try:
+        # 尝试复用现有的提取逻辑，或者简单实现
+        if check_content_str:
+            # 简单解析：尝试提取 text 字段
+            try:
+                content_obj = json.loads(check_content_str)
+                # 递归提取所有 text 字段
+                def extract_text(obj):
+                    texts = []
+                    if isinstance(obj, dict):
+                        for k, v in obj.items():
+                            if k == 'text' and isinstance(v, str):
+                                texts.append(v)
+                            else:
+                                texts.extend(extract_text(v))
+                    elif isinstance(obj, list):
+                        for item in obj:
+                            texts.extend(extract_text(item))
+                    return texts
+                
+                texts = extract_text(content_obj)
+                plain_text = " ".join(texts)
+            except:
+                plain_text = check_content_str # Fallback
+    except Exception as e:
+        print(f"  > [路由] 解析文本失败: {e}")
+        plain_text = check_content_str
+
+    # 3. 检查标签
+    # 默认使用 ARCHIVE_DOC_TOKEN (如果没有配置，且没匹配到标签，则返回 None)
+    target_token = ARCHIVE_DOC_TOKEN or None
+    matched_tag = "默认"
+    
+    if plain_text:
+        # 优先匹配长标签
+        sorted_tags = sorted(TAG_MAPPING.keys(), key=len, reverse=True)
+        
+        for tag in sorted_tags:
+            token = TAG_MAPPING.get(tag)
+            if not token: continue 
+            
+            # 检查 #标签
+            search_key = f"#{tag}"
+            if search_key in plain_text:
+                target_token = token
+                matched_tag = tag
+                break
+                
+    # print(f"  > [路由] 标签: {matched_tag} -> 文档: {target_token}")
+    return target_token, matched_tag
 
 
 # 用户昵称缓存 - 使用LRU防止内存泄漏
@@ -95,77 +188,94 @@ def do_p2_im_message_receive_v1(data: lark.im.v1.P2ImMessageReceiveV1) -> None:
     print(f"  > [分析] 会话类型: {chat_type}, 是否单聊: {is_p2p}")
 
     # 情况 A：如果是单聊（P2P），处理文档链接或纯文本
+    # 情况 A：如果是单聊（P2P），暂时忽略（仅保留日志）
     if is_p2p:
-        print(f"  > [单聊] 检测到单聊消息，开始处理...")
-        text_content, _ = MetricsCalculator.extract_text_from_content(message.content)
-        print(f"  > [单聊] 提取的文本内容: {text_content[:100]}...")
-        
-        try:
-            # 优先尝试识别文档链接
-            processed = doc_processor.process_and_reply(text_content, message.chat_id)
-            if processed:
-                print(f"  > [MCP] 单聊文档提取已完成")
-            else:
-                # 如果不是文档链接，检查是否为纯文本（长度大于10字符）
-                if len(text_content.strip()) > 10:
-                    print(f"  > [文本转图] 未检测到文档链接，尝试将文本转为图片...")
-                    from reply_card.card_style_generator import CardStyleImageGenerator
-                    import requests
-                    import json
-                    
-                    # 文字消息：保持标题为空，消息全部作为正文
-                    title = ""
-                    content_for_image = text_content
-                    
-                    # 生成图片
-                    generator = CardStyleImageGenerator()
-                    image_data = generator.generate_card_image(title, content_for_image)
-                    
-                    # 上传并发送图片
-                    upload_url = "https://open.feishu.cn/open-apis/im/v1/images"
-                    token = auth.get_tenant_access_token()
-                    upload_headers = {"Authorization": f"Bearer {token}"}
-                    files = {'image': ('text_preview.png', image_data, 'image/png')}
-                    data = {'image_type': 'message'}
-                    
-                    upload_response = requests.post(upload_url, headers=upload_headers, files=files, data=data, timeout=10)
-                    
-                    if upload_response.status_code == 200:
-                        result = upload_response.json()
-                        if result.get("code") == 0:
-                            image_key = result["data"]["image_key"]
-                            
-                            # 发送图片消息
-                            send_url = "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id"
-                            send_headers = auth.get_headers()
-                            payload = {
-                                "receive_id": message.chat_id,
-                                "msg_type": "image",
-                                "content": json.dumps({"image_key": image_key})
-                            }
-                            send_response = requests.post(send_url, headers=send_headers, json=payload, timeout=10)
-                            
-                            if send_response.status_code == 200:
-                                print(f"  > [文本转图] ✅ 文本预览图片发送成功")
-                            else:
-                                print(f"  > [文本转图] ❌ 图片发送失败: {send_response.text}")
-                        else:
-                            print(f"  > [文本转图] ❌ 图片上传失败: {result}")
-                    else:
-                        print(f"  > [文本转图] ❌ 上传请求失败: {upload_response.status_code}")
-                else:
-                    print(f"  > [MCP] 文本过短，跳过处理")
-        except Exception as e:
-            print(f"  > [MCP] 单聊消息处理异常: {e}")
-            import traceback
-            traceback.print_exc()
-        return  # 单聊不参与后续的群统计逻辑
+        print(f"  > [单聊] 收到单聊消息，跳过自动处理")
+        return  # 单聊不参与后续逻辑
 
     # 情况 B：如果是非目标群组，跳过
     if not is_target_group:
         return
 
-    # 情况 C：目标群组的消息，继续原有的统计逻辑
+    # 情况 C：目标群组的消息，执行归档和统计
+    
+    # [新增] 自动归档群消息到文档
+    # 尝试获取目标文档 Token，如果既没匹配标签也没配置默认文档，则返回 None
+    target_doc_token, matched_tag = get_target_doc_token(message)
+
+    if target_doc_token:
+        try:
+            print(f"  > [归档] 正在采集群消息到文档 {target_doc_token}...")
+            
+            # ... (中间代码保持不变，通过省略号或不需要改动) ... 
+            # 实际上由于 replace_file_content 需要连续块，我必须完整包含
+
+            # 获取发送者昵称
+            # sender.sender_id 可能有多种格式，需要正确提取
+            sender_id = None
+            if sender and sender.sender_id:
+                # 尝试获取 user_id 或 open_id
+                sender_id = getattr(sender.sender_id, 'user_id', None) or \
+                           getattr(sender.sender_id, 'open_id', None) or \
+                           getattr(sender.sender_id, 'union_id', None)
+            
+            if sender_id:
+                sender_nickname = get_cached_nickname(sender_id)
+            else:
+                sender_nickname = "未知用户"
+            
+            # 格式化发送时间
+            create_time = message.create_time
+            if create_time:
+                # create_time 是毫秒时间戳
+                send_time = datetime.fromtimestamp(int(create_time) / 1000).strftime("%Y-%m-%d %H:%M:%S")
+            else:
+                send_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            
+            # 判断是否是回复消息（有 parent_id 或 root_id 就是回复）
+            is_reply = bool(message.parent_id or message.root_id)
+            
+            # [路由] 获取目标归档文档 Token (已在上方获取)
+            print(f"  > [归档] 目标文档: {target_doc_token} (Tag: {matched_tag})")
+
+            # 获取被回复者的昵称（仅针对嵌套回复）
+            parent_sender_nickname = None
+            if is_reply and message.parent_id and message.root_id and message.parent_id != message.root_id:
+                try:
+                    # 获取父消息详情
+                    parent_msg = collector.get_message_detail(message.parent_id)
+                    if parent_msg:
+                        # 提取父消息发送者ID
+                        parent_sender = parent_msg.get("sender", {})
+                        parent_sender_id_obj = parent_sender.get("sender_id", {})
+                        # API 返回的 sender_id 对象可能是字典
+                        parent_uid = parent_sender_id_obj.get("user_id") or \
+                                   parent_sender_id_obj.get("open_id") or \
+                                   parent_sender_id_obj.get("union_id")
+                        
+                        if parent_uid:
+                            parent_sender_nickname = get_cached_nickname(parent_uid)
+                except Exception as e:
+                    print(f"  > [归档] 获取被回复者信息失败: {e}")
+
+            # 转换内容（带发送者和时间，以及是否是回复）
+            # 如果匹配到了具体标签（非"默认"），则通知 convert 移除该标签
+            tag_to_remove = matched_tag if matched_tag != "默认" else None
+            
+            blocks = docx_converter.convert(
+                message.content, message.message_id, target_doc_token,
+                sender_name=sender_nickname, send_time=send_time, 
+                is_reply=is_reply, parent_sender_name=parent_sender_nickname,
+                remove_tag=tag_to_remove
+            )
+            # 写入文档（回复消息需要插入在分割线之前）
+            docx_storage.add_blocks(target_doc_token, blocks, insert_before_divider=is_reply)
+            print(f"  > [归档] ✅ 群消息已同步 (回复: {is_reply}, Doc: {target_doc_token[-6:]})")
+        except Exception as e:
+            print(f"  > [归档] ❌ 同步失败: {e}")
+            import traceback
+            traceback.print_exc()
+
     content_str = message.content
     char_count = calculator._extract_text_length(content_str)
 
@@ -175,6 +285,37 @@ def do_p2_im_message_receive_v1(data: lark.im.v1.P2ImMessageReceiveV1) -> None:
 
     # 3. 获取发送者昵称
     user_name = get_cached_nickname(sender_id)
+
+    # [Bitable归档] 恢复功能：归档消息到 Bitable (双表格模式)
+    try:
+        # 处理附件
+        file_tokens_for_db, text_content_for_db = _process_message_attachments(message, message.message_id)
+        
+        # 准备时间字段
+        create_time_ms = int(message.create_time)
+        dt_object = datetime.fromtimestamp(create_time_ms / 1000)
+        month_str = dt_object.strftime("%Y-%m")
+        
+        # 1. 归档到消息明细表
+        archive_fields = _build_archive_fields(
+            message, sender_id, user_name, text_content_for_db,
+            file_tokens_for_db, month_str, create_time_ms
+        )
+        if hasattr(archive_storage, "save_message"):
+            archive_storage.save_message(archive_fields)
+            print(f"  > [Bitable] ✅ 消息已存入数据库")
+
+        # 2. 更新话题汇总表
+        real_root_id = message.root_id or message.message_id
+        
+        _update_topic_summary(
+            message, sender_id, user_name, text_content_for_db,
+            real_root_id, month_str, create_time_ms
+        )
+        print(f"  > [Bitable] ✅ 话题概要已更新")
+
+    except Exception as e:
+        print(f"  > [Bitable] ❌ 归档失败: {e}")
 
     # 4. 构建指标增量
     metrics_delta = {
@@ -233,12 +374,6 @@ def do_p2_im_message_receive_v1(data: lark.im.v1.P2ImMessageReceiveV1) -> None:
                     )
 
         print("✅ 实时同步圆满成功")
-
-        # 8. 归档消息到新表
-        try:
-            archive_message_logic(message, sender_id, user_name)
-        except Exception as e:
-            print(f"  > [归档] ⚠️ 归档逻辑执行失败: {e}")
 
     except Exception as e:
         print(f"❌ 实时更新失败: {e}")
@@ -466,37 +601,6 @@ def _update_topic_summary(
         archive_storage.update_or_create_topic(root_id, summary_fields, is_new=False)
 
 
-def archive_message_logic(message, sender_id, user_name):
-    """
-    处理消息归档和话题汇总（重构版）
-
-    将消息保存到归档表，并更新话题汇总信息
-
-    Args:
-        message: 消息对象
-        sender_id: 发送者ID
-        user_name: 发送者姓名
-    """
-    now = datetime.now()
-    month_str = now.strftime("%Y-%m")
-    timestamp_ms = int(now.timestamp() * 1000)
-
-    # 1. 处理附件
-    file_tokens, text_content = _process_message_attachments(message, message.message_id)
-
-    # 2. 构建归档字段
-    archive_fields = _build_archive_fields(
-        message, sender_id, user_name, text_content, file_tokens, month_str, timestamp_ms
-    )
-
-    # 3. 保存到消息归档表
-    archive_storage.save_message(archive_fields)
-
-    # 4. 更新话题汇总
-    root_id = message.root_id or message.message_id
-    _update_topic_summary(
-        message, sender_id, user_name, text_content, root_id, month_str, timestamp_ms
-    )
 
 
 def do_p2_im_message_reaction_created_v1(data: lark.im.v1.P2ImMessageReactionCreatedV1) -> None:
@@ -619,7 +723,12 @@ def main():
             
             if pin_table_id and not pin_monitor:
                 print(f"🔍 Pin监控已启用 (轮询间隔: {pin_interval}秒)")
-                pin_monitor = PinMonitor(auth, storage, CHAT_ID, interval=pin_interval)
+                # 注入精华文档归档配置
+                essence_doc_token = os.getenv("ESSENCE_DOC_TOKEN")
+                pin_monitor = PinMonitor(
+                    auth, storage, CHAT_ID, interval=pin_interval,
+                    docx_storage=docx_storage, essence_doc_token=essence_doc_token
+                )
                 pin_monitor.start()
                 health_monitor.set_pin_monitor_status(True)
             

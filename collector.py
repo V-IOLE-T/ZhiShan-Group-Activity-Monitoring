@@ -262,3 +262,25 @@ class MessageCollector:
         except Exception as e:
             print(f"请求消息详情出错: {e}")
         return None
+
+    @with_rate_limit
+    def get_message_detail(self, message_id: str) -> Optional[Dict[str, Any]]:
+        """获取单条消息详情"""
+        if not message_id:
+            return None
+            
+        url = f"https://open.feishu.cn/open-apis/im/v1/messages/{message_id}"
+        
+        try:
+            response = requests.get(url, headers=self.auth.get_headers(), timeout=API_TIMEOUT)
+            data = response.json()
+            if data.get("code") == 0:
+                items = data.get("data", {}).get("items", [])
+                if items:
+                    return items[0] # API 返回 items 列表
+            else:
+                print(f"⚠️ 获取消息详情失败: {data}")
+            return None
+        except Exception as e:
+            print(f"❌ 获取消息详情异常: {e}")
+            return None

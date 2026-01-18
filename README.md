@@ -1,8 +1,8 @@
 # 飞书群聊活跃度监测系统 V4
 
-> **🎉 V4.1 生产级稳定性更新 (2026-01-16)**  
-> 新增：环境自动验证 | 健康检查端点 | 自动重连机制 | 日志智能轮转  
-> **推荐所有用户立即升级** - [5分钟快速升级指南](QUICK_FIX_GUIDE.md)
+> **🎉 V4.2 全功能版发布 (2026-01-19)**  
+> 新增：Pin消息积分(+5分) | 双重归档 (精华文档 + 数据表格) | 话题深度分析  
+> **推荐所有用户立即升级**
 
 基于 Python 开发的**企业级**飞书群聊活跃度监测工具，通过长连接 WebSocket 实时监听群消息和表情回复，自动计算用户活跃度并同步到飞书多维表格，支持 Pin 消息归档和富文本内容保存。
 
@@ -82,7 +82,6 @@ feishu/
 # 文档
 ├── README.md                        # 主文档
 ├── PIN_FEATURE_GUIDE.md             # Pin功能详细指南
-├── LINK_FEATURE.md                  # 消息链接功能说明
 ├── VISUALIZATION_GUIDE.md           # 数据可视化指南
 └── DEVELOPMENT.md                   # 开发者文档
 ```
@@ -163,6 +162,7 @@ pip install -r requirements.txt
 | 发起话题数 | 数字 | 发起新话题次数 |
 | 点赞数 | 数字 | 给他人点赞次数 |
 | 被点赞数 | 数字 | 收到点赞次数 |
+| 被Pin次数 | 数字 | 累计被Pin消息数 |
 | 活跃度分数 | 数字 | 综合评分 (保留2位小数) |
 | 更新时间 | 数字 | 时间戳 (毫秒) |
 
@@ -200,6 +200,10 @@ BITABLE_TABLE_ID=tblxxxxxxxxxx     # 用户活跃度统计表 ID
 
 # 可选配置（启用Pin监控功能时需要）
 PIN_ARCHIVE_TABLE_ID=tblxxxxxxxxxx # Pin消息归档表 ID
+
+# 可选配置（启用消息全量归档时需要）
+ARCHIVE_TABLE_ID=tblxxxxxxxxxx     # 消息明细归档表 ID
+SUMMARY_TABLE_ID=tblxxxxxxxxxx     # 话题汇总归档表 ID
 ```
 
 **如何获取这些 ID？**
@@ -367,6 +371,7 @@ docker-compose down
           + 发起话题数 × 1.0
           + 点赞数 × 1.0
           + 被点赞数 × 1.0
+          + 被Pin次数 × 5.0
 ```
 
 ### 设计理念
@@ -380,6 +385,7 @@ docker-compose down
 | 发起话题数 | 1.0 | 主动发起有价值的讨论 |
 | 点赞数 | 1.0 | 积极互动 |
 | 被点赞数 | 1.0 | 内容受认可 |
+| 被Pin次数 | 5.0 | 高价值内容贡献 (不可回滚) |
 
 ## 🔍 核心功能说明
 
@@ -517,7 +523,6 @@ pytest tests/
 ## � 相关文档
 
 - 📌 [Pin功能完整指南](PIN_FEATURE_GUIDE.md) - Pin消息监控与归档功能详解
-- 🔗 [消息链接功能说明](LINK_FEATURE.md) - 为归档消息生成跳转链接
 - 📊 [数据可视化指南](VISUALIZATION_GUIDE.md) - 使用飞书仪表盘展示数据
 - 🚀 [快速开始：可视化](VISUALIZATION_QUICKSTART.md) - 5分钟搭建数据看板
 - 💻 [开发者文档](DEVELOPMENT.md) - 代码结构、测试、贡献指南

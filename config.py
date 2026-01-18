@@ -41,6 +41,7 @@ ACTIVITY_WEIGHTS: Dict[str, float] = {
     "topic_initiated": 1.0,  # 发起话题数权重
     "reaction_given": 1.0,  # 点赞数权重
     "reaction_received": 1.0,  # 被点赞数权重
+    "pin_received": 5.0,  # 被Pin次数权重（高价值内容）
 }
 
 # ========== 话题状态时间阈值（天）==========

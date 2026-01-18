@@ -5,6 +5,7 @@ from datetime import datetime
 from dotenv import load_dotenv
 from config import ACTIVITY_WEIGHTS
 from rate_limiter import with_rate_limit
+import json  # Added json import
 
 load_dotenv()
 
@@ -95,6 +96,7 @@ class BitableStorage:
                 + fields["发起话题数"] * ACTIVITY_WEIGHTS["topic_initiated"]
                 + fields["点赞数"] * ACTIVITY_WEIGHTS["reaction_given"]
                 + fields["被点赞数"] * ACTIVITY_WEIGHTS["reaction_received"]
+                + int(old_fields.get("被Pin次数", 0)) * ACTIVITY_WEIGHTS.get("pin_received", 0)
             )
             fields["活跃度分数"] = round(score, 2)
 
@@ -129,6 +131,7 @@ class BitableStorage:
                     "发起话题数": metrics_delta.get("topic_initiated", 0),
                     "点赞数": metrics_delta.get("reaction_given", 0),
                     "被点赞数": metrics_delta.get("reaction_received", 0),
+                    "被Pin次数": 0,
                 }
             )
             score = (
@@ -139,6 +142,7 @@ class BitableStorage:
                 + fields["发起话题数"] * ACTIVITY_WEIGHTS["topic_initiated"]
                 + fields["点赞数"] * ACTIVITY_WEIGHTS["reaction_given"]
                 + fields["被点赞数"] * ACTIVITY_WEIGHTS["reaction_received"]
+                + fields["被Pin次数"] * ACTIVITY_WEIGHTS.get("pin_received", 0)
             )
             fields["活跃度分数"] = round(score, 2)
 
@@ -288,8 +292,20 @@ class BitableStorage:
             current_count = int(old_fields.get("被Pin次数", 0))
             new_count = current_count + 1
 
+            # 重新计算分数
+            score = (
+                int(old_fields.get("发言次数", 0)) * ACTIVITY_WEIGHTS["message_count"]
+                + int(old_fields.get("发言字数", 0)) * ACTIVITY_WEIGHTS["char_count"]
+                + int(old_fields.get("被回复数", 0)) * ACTIVITY_WEIGHTS["reply_received"]
+                + int(old_fields.get("单独被@次数", 0)) * ACTIVITY_WEIGHTS["mention_received"]
+                + int(old_fields.get("发起话题数", 0)) * ACTIVITY_WEIGHTS["topic_initiated"]
+                + int(old_fields.get("点赞数", 0)) * ACTIVITY_WEIGHTS["reaction_given"]
+                + int(old_fields.get("被点赞数", 0)) * ACTIVITY_WEIGHTS["reaction_received"]
+                + new_count * ACTIVITY_WEIGHTS.get("pin_received", 0)
+            )
+
             url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{self.app_token}/tables/{self.table_id}/records/{record_id}"
-            fields = {"被Pin次数": new_count}
+            fields = {"被Pin次数": new_count, "活跃度分数": round(score, 2)}
 
             try:
                 response = requests.put(
@@ -337,35 +353,10 @@ class BitableStorage:
     @with_rate_limit
     def decrement_pin_count(self, user_id, user_name):
         """
-        减少用户被Pin次数统计
-
-        Args:
-            user_id: 用户ID
-            user_name: 用户名称
+        减少用户被Pin次数统计 (根据需求已禁用: 取消Pin不扣分)
         """
-        month = datetime.now().strftime("%Y-%m")
-        record = self.get_record_by_user_month(user_id, month)
-
-        if record:
-            record_id = record["record_id"]
-            old_fields = record["fields"]
-            current_count = int(old_fields.get("被Pin次数", 0))
-            new_count = max(0, current_count - 1)  # 确保不会小于0
-
-            url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{self.app_token}/tables/{self.table_id}/records/{record_id}"
-            fields = {"被Pin次数": new_count}
-
-            try:
-                response = requests.put(
-                    url, headers=self.auth.get_headers(), json={"fields": fields}, timeout=10
-                )
-                result = response.json()
-                if result.get("code") == 0:
-                    print(f"[Pin统计] ✅ {user_name} 被Pin次数: {current_count} -> {new_count}")
-                else:
-                    print(f"[Pin统计] ❌ 更新被Pin次数失败: {result}")
-            except Exception as e:
-                print(f"[Pin统计] ❌ 更新异常: {e}")
+        print(f"[Pin统计] ℹ️ 检测到取消Pin操作，但配置为不扣除活跃度/次数")
+        return
 
 
 class MessageArchiveStorage:
@@ -508,4 +499,236 @@ class MessageArchiveStorage:
                 return None
         except Exception as e:
             print(f"  > [附件] ❌ 上传素材出错: {e}")
+            return None
+
+
+class DocxStorage:
+    def __init__(self, auth):
+        self.auth = auth
+        self.message_storage = MessageArchiveStorage(auth)  # 复用下载功能
+
+    @with_rate_limit
+    def create_document(self, folder_token=None, title=""):
+        """创建一个新的 Docx 文档"""
+        url = "https://open.feishu.cn/open-apis/docx/v1/documents"
+        payload = {"folder_token": folder_token, "title": title}
+        # 移除 None 值的键
+        payload = {k: v for k, v in payload.items() if v is not None}
+        
+        try:
+            response = requests.post(
+                url, headers=self.auth.get_headers(), json=payload, timeout=10
+            )
+            data = response.json()
+            if data.get("code") == 0:
+                doc_info = data.get("data", {}).get("document", {})
+                print(f"  > [Docx] ✅ 文档创建成功: {doc_info.get('document_id')}")
+                return doc_info
+            else:
+                print(f"  > [Docx] ❌ 创建文档失败: {data}")
+                return None
+        except Exception as e:
+            print(f"  > [Docx] ❌ 创建文档异常: {e}")
+            return None
+
+    @with_rate_limit
+    def add_blocks(self, document_id, blocks, insert_before_divider=False):
+        """向文档添加 Blocks
+        
+        Args:
+            document_id: 文档ID
+            blocks: 要添加的块列表
+            insert_before_divider: 是否在最后一个分割线前插入（用于回复消息）
+        """
+        if not blocks:
+            return True
+        
+        # 如果需要在分割线前插入，先获取文档块列表找到位置
+        insert_index = -1  # -1 表示追加到末尾
+        if insert_before_divider:
+            doc_blocks = self.get_document_blocks(document_id)
+            if doc_blocks:
+                # 从后往前找最后一个分割线
+                for i in range(len(doc_blocks) - 1, -1, -1):
+                    if doc_blocks[i].get("block_type") == 22:  # Divider
+                        insert_index = i
+                        print(f"  > [Docx] 找到分割线位置: {insert_index}")
+                        break
+            
+        url = f"https://open.feishu.cn/open-apis/docx/v1/documents/{document_id}/blocks/{document_id}/children"
+        
+        # 分离文本块和图片块
+        text_blocks = [b for b in blocks if b.get("block_type") != 27]
+        image_blocks = [b for b in blocks if b.get("block_type") == 27]
+        
+        # 先发送文本块
+        if text_blocks:
+            payload = {"children": text_blocks}
+            if insert_index >= 0:
+                payload["index"] = insert_index
+            print(f"  > [DEBUG] Text Payload (index={insert_index}): {json.dumps(payload)[:300]}...")
+            try:
+                response = requests.post(
+                    url, headers=self.auth.get_headers(), json=payload, timeout=20
+                )
+                data = response.json()
+                if data.get("code") == 0:
+                    print(f"  > [Docx] ✅ 已添加 {len(text_blocks)} 个文本 Block")
+                else:
+                    print(f"  > [Docx] ❌ 添加文本 Blocks 失败: {data}")
+            except Exception as e:
+                print(f"  > [Docx] ❌ 添加文本 Blocks 异常: {e}")
+        
+        # 图片块需要特殊处理：使用官方三步流程
+        for img_block in image_blocks:
+            img_token = img_block.get("image", {}).get("token", "")
+            if not img_token or not img_token.startswith("pending:"):
+                continue
+            
+            # 提取 file_key
+            file_key = img_token.replace("pending:", "")
+            
+            # 调用新的官方流程处理方法
+            self.process_image_block(document_id, file_key)
+
+    @with_rate_limit
+    def get_document_blocks(self, document_id):
+        """获取文档的块列表"""
+        url = f"https://open.feishu.cn/open-apis/docx/v1/documents/{document_id}/blocks/{document_id}/children"
+        
+        try:
+            response = requests.get(url, headers=self.auth.get_headers(), timeout=20)
+            data = response.json()
+            if data.get("code") == 0:
+                items = data.get("data", {}).get("items", [])
+                print(f"  > [Docx] 获取到 {len(items)} 个块")
+                return items
+            else:
+                print(f"  > [Docx] ❌ 获取块列表失败: {data}")
+                return []
+        except Exception as e:
+            print(f"  > [Docx] ❌ 获取块列表异常: {e}")
+            return []
+
+    def transfer_image_to_docx(self, message_id, file_key, doc_id):
+        """
+        从消息下载图片 - 这个方法只负责下载，不再上传
+        返回图片二进制数据和 file_key
+        """
+        # 下载图片
+        print(f"  > [Docx] 正在下载图片: {file_key}")
+        file_bin = self.message_storage.download_message_resource(message_id, file_key, "image")
+        if not file_bin:
+            print(f"  > [Docx] ❌ 图片下载失败")
+            return None
+        
+        # 返回下载的二进制数据，供后续流程使用
+        # 我们把二进制数据缓存在实例变量中
+        if not hasattr(self, '_image_cache'):
+            self._image_cache = {}
+        self._image_cache[file_key] = file_bin
+        
+        # 返回 file_key 作为临时标识
+        return f"pending:{file_key}"
+    
+    def process_image_block(self, document_id, file_key):
+        """
+        按官方文档流程处理图片：
+        1. 创建空图片 Block
+        2. 上传图片到 Block ID
+        3. 用 batch_update 更新
+        """
+        # 获取缓存的图片数据
+        if not hasattr(self, '_image_cache') or file_key not in self._image_cache:
+            print(f"  > [Docx] ❌ 图片缓存未找到: {file_key}")
+            return False
+            
+        file_bin = self._image_cache[file_key]
+        
+        # 步骤1: 创建空图片 Block
+        create_url = f"https://open.feishu.cn/open-apis/docx/v1/documents/{document_id}/blocks/{document_id}/children"
+        empty_image_payload = {"children": [{"block_type": 27, "image": {}}]}
+        print(f"  > [Docx] 步骤1: 创建空图片 Block...")
+        
+        try:
+            response = requests.post(
+                create_url, headers=self.auth.get_headers(), json=empty_image_payload, timeout=20
+            )
+            data = response.json()
+            if data.get("code") != 0:
+                print(f"  > [Docx] ❌ 创建空图片 Block 失败: {data}")
+                return False
+                
+            children = data.get("data", {}).get("children", [])
+            if not children:
+                print(f"  > [Docx] ❌ 创建图片 Block 无返回数据")
+                return False
+            image_block_id = children[0].get("block_id")
+            print(f"  > [Docx] ✅ 创建空图片 Block: {image_block_id}")
+            
+            # 步骤2: 上传图片到 Block ID
+            print(f"  > [Docx] 步骤2: 上传图片到 Block...")
+            file_token = self._upload_file_for_docx(file_bin, f"{file_key}.png", image_block_id)
+            if not file_token:
+                print(f"  > [Docx] ❌ 图片上传失败")
+                return False
+                
+            # 步骤3: 用 batch_update 更新图片 Block
+            batch_update_url = f"https://open.feishu.cn/open-apis/docx/v1/documents/{document_id}/blocks/batch_update"
+            update_payload = {
+                "requests": [
+                    {
+                        "block_id": image_block_id,
+                        "replace_image": {
+                            "token": file_token
+                        }
+                    }
+                ]
+            }
+            print(f"  > [Docx] 步骤3: 更新图片 Block (token: {file_token})...")
+            update_response = requests.patch(
+                batch_update_url, headers=self.auth.get_headers(), json=update_payload, timeout=20
+            )
+            update_data = update_response.json()
+            if update_data.get("code") == 0:
+                print(f"  > [Docx] ✅ 图片 Block 更新成功")
+                # 清理缓存
+                del self._image_cache[file_key]
+                return True
+            else:
+                print(f"  > [Docx] ❌ 更新图片 Block 失败: {update_data}")
+                return False
+                
+        except Exception as e:
+            print(f"  > [Docx] ❌ 图片处理异常: {e}")
+            return False
+
+    def _upload_file_for_docx(self, file_content, file_name, parent_node):
+        """上传文件用于 Docx"""
+        url = "https://open.feishu.cn/open-apis/drive/v1/medias/upload_all"
+        
+        form_data = {
+            "file_name": file_name,
+            "parent_type": "docx_image",
+            "parent_node": parent_node,
+            "size": str(len(file_content)),
+        }
+        
+        files = {"file": (file_name, file_content)}
+        upload_headers = {"Authorization": self.auth.get_headers()["Authorization"]}
+        
+        try:
+            response = requests.post(
+                url, headers=upload_headers, data=form_data, files=files, timeout=60
+            )
+            data = response.json()
+            if data.get("code") == 0:
+                file_token = data.get("data", {}).get("file_token")
+                print(f"  > [Docx] ✅ 图片上传成功: {file_token}")
+                return file_token
+            else:
+                print(f"  > [Docx] ❌ 图片上传失败: {data}")
+                return None
+        except Exception as e:
+            print(f"  > [Docx] ❌ 图片上传异常: {e}")
             return None

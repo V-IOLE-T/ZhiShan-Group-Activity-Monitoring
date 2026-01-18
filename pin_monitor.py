@@ -14,7 +14,7 @@ load_dotenv()
 class PinMonitor:
     """Pin消息监控类 - 定期轮询检测Pin消息变化"""
 
-    def __init__(self, auth, storage, chat_id, interval=30):
+    def __init__(self, auth, storage, chat_id, interval=30, docx_storage=None, essence_doc_token=None):
         """
         初始化Pin监控器
 
@@ -23,11 +23,20 @@ class PinMonitor:
             storage: BitableStorage实例 (用于统计被Pin次数)
             chat_id: 要监控的群组ID
             interval: 轮询间隔(秒)，默认30秒
+            docx_storage: DocxStorage实例 (可选，用于归档到精华文档)
+            essence_doc_token: 精华文档Token (可选)
         """
         self.auth = auth
         self.storage = storage
         self.chat_id = chat_id
         self.interval = interval
+        self.docx_storage = docx_storage
+        self.essence_doc_token = essence_doc_token
+        
+        self.converter = None
+        if self.docx_storage:
+            from message_renderer import MessageToDocxConverter
+            self.converter = MessageToDocxConverter(self.docx_storage)
 
         # 缓存当前Pin消息ID列表
         self.current_pin_ids = set()
@@ -143,6 +152,7 @@ class PinMonitor:
                     "sender_id": message_data.get("sender", {}).get("id"),
                     "message_type": msg_type,
                     "content": text_content,  # 纯文本内容
+                    "raw_content": content_str, # 原始JSON内容
                     "create_time": message_data.get("create_time"),
                     "chat_id": message_data.get("chat_id"),
                     "image_keys": image_keys,  # 富文本中的图片keys
@@ -377,6 +387,25 @@ class PinMonitor:
         # 3. 更新被Pin次数统计
         if hasattr(self.storage, "increment_pin_count"):
             self.storage.increment_pin_count(sender_id, sender_name)
+
+        # 4. 归档到精华文档 (Docx)
+        if self.converter and self.essence_doc_token:
+            print(f"[Pin监控] 正在归档到精华文档: {self.essence_doc_token}")
+            try:
+                # 需使用原始 JSON 内容
+                raw_content = message_details.get("raw_content", "")
+                
+                # 转换: 显示消息发送者和消息时间
+                blocks = self.converter.convert(
+                    raw_content, message_id, self.essence_doc_token,
+                    sender_name=sender_name, send_time=msg_create_time_str
+                )
+                
+                # 写入文档
+                self.docx_storage.add_blocks(self.essence_doc_token, blocks)
+                print(f"[Pin监控] ✅ 已归档到精华文档")
+            except Exception as e:
+                print(f"[Pin监控] ❌ 归档到精华文档失败: {e}")
 
     def _download_and_upload_resource(self, message_id, file_key, resource_type, file_name):
         """
