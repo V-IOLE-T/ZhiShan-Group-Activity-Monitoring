@@ -16,6 +16,7 @@ from reply_card import DocCardProcessor
 from utils import LRUCache
 from storage import DocxStorage
 from message_renderer import MessageToDocxConverter
+from pin_scheduler import start_pin_scheduler, stop_pin_scheduler
 
 load_dotenv()
 
@@ -130,6 +131,11 @@ user_name_cache = LRUCache(capacity=CACHE_USER_NAME_SIZE)
 # 事件去重缓存 - 使用LRU防止内存泄漏
 processed_events = LRUCache(capacity=CACHE_EVENT_SIZE)
 
+# 批量更新配置
+BATCH_UPDATE_THRESHOLD = 3  # 每 3 条消息更新一次
+message_counter = 0
+pending_updates = {}  # {user_id: {"user_name": str, "metrics": dict}}
+
 
 def get_cached_nickname(user_id):
     """获取缓存的昵称，如果不存在则从 API 获取并更新缓存"""
@@ -147,6 +153,51 @@ def get_cached_nickname(user_id):
             user_name_cache.set(uid, name)
 
     return user_name_cache.get(user_id, user_id)
+
+
+def accumulate_metrics(user_id: str, user_name: str, metrics_delta: dict):
+    """累积用户指标到待更新字典"""
+    global pending_updates
+    
+    if user_id not in pending_updates:
+        pending_updates[user_id] = {
+            "user_name": user_name,
+            "metrics": {
+                "message_count": 0,
+                "char_count": 0,
+                "reply_received": 0,
+                "mention_received": 0,
+                "topic_initiated": 0,
+            }
+        }
+    
+    # 累加指标
+    for key, value in metrics_delta.items():
+        if key in pending_updates[user_id]["metrics"]:
+            pending_updates[user_id]["metrics"][key] += value
+
+
+def flush_pending_updates():
+    """批量更新所有待处理的用户统计"""
+    global pending_updates
+    
+    if not pending_updates:
+        return
+    
+    print(f"📊 批量更新 {len(pending_updates)} 个用户的统计数据...")
+    
+    for user_id, data in pending_updates.items():
+        try:
+            storage.update_or_create_record(
+                user_id, 
+                data["user_name"], 
+                data["metrics"]
+            )
+        except Exception as e:
+            print(f"❌ 更新 {data['user_name']} 失败: {e}")
+    
+    pending_updates = {}
+    print("✅ 批量更新完成")
 
 
 def do_p2_im_message_receive_v1(data: lark.im.v1.P2ImMessageReceiveV1) -> None:
@@ -188,10 +239,47 @@ def do_p2_im_message_receive_v1(data: lark.im.v1.P2ImMessageReceiveV1) -> None:
     print(f"  > [分析] 会话类型: {chat_type}, 是否单聊: {is_p2p}")
 
     # 情况 A：如果是单聊（P2P），处理文档链接或纯文本
-    # 情况 A：如果是单聊（P2P），暂时忽略（仅保留日志）
     if is_p2p:
-        print(f"  > [单聊] 收到单聊消息，跳过自动处理")
-        return  # 单聊不参与后续逻辑
+        print(f"  > [单聊] 收到单聊消息，准备处理...")
+        try:
+            # 提取消息文本内容
+            message_text = ""
+            if message.message_type == "text":
+                try:
+                    content_obj = json.loads(message.content)
+                    message_text = content_obj.get("text", "")
+                except:
+                    message_text = message.content
+            
+            # 检测是否包含文档链接
+            has_doc_link = doc_processor.extract_token(message_text)
+            
+            if has_doc_link:
+                # 处理文档链接，发送卡片样式图片（带绿色标题）
+                print(f"  > [单聊] 检测到文档链接，正在生成卡片...")
+                doc_processor.process_and_reply(message_text, message.chat_id)
+            elif message_text.strip():
+                # 纯文本消息，生成简洁图片（无标题栏）
+                print(f"  > [单聊] 收到纯文本: {message_text[:50]}...")
+                try:
+                    from reply_card.image_generator import DocImageGenerator
+                    generator = DocImageGenerator()
+                    # 纯文本作为内容，标题为空
+                    image_data = generator.generate_doc_image("", message_text)
+                    doc_processor._send_image_reply(message.chat_id, image_data)
+                    print(f"  > [单聊] ✅ 纯文本图片发送成功")
+                except Exception as e:
+                    print(f"  > [单聊] ❌ 图片生成失败: {e}")
+                    import traceback
+                    traceback.print_exc()
+            else:
+                print(f"  > [单聊] 消息内容为空或非文本类型，跳过")
+        except Exception as e:
+            print(f"  > [单聊] 处理异常: {e}")
+            import traceback
+            traceback.print_exc()
+        
+        return  # 单聊处理完毕，不参与群组统计逻辑
 
     # 情况 B：如果是非目标群组，跳过
     if not is_target_group:
@@ -237,40 +325,44 @@ def do_p2_im_message_receive_v1(data: lark.im.v1.P2ImMessageReceiveV1) -> None:
             
             # [路由] 获取目标归档文档 Token (已在上方获取)
             print(f"  > [归档] 目标文档: {target_doc_token} (Tag: {matched_tag})")
-
-            # 获取被回复者的昵称（仅针对嵌套回复）
-            parent_sender_nickname = None
-            if is_reply and message.parent_id and message.root_id and message.parent_id != message.root_id:
-                try:
-                    # 获取父消息详情
-                    parent_msg = collector.get_message_detail(message.parent_id)
-                    if parent_msg:
-                        # 提取父消息发送者ID
-                        parent_sender = parent_msg.get("sender", {})
-                        parent_sender_id_obj = parent_sender.get("sender_id", {})
-                        # API 返回的 sender_id 对象可能是字典
-                        parent_uid = parent_sender_id_obj.get("user_id") or \
-                                   parent_sender_id_obj.get("open_id") or \
-                                   parent_sender_id_obj.get("union_id")
-                        
-                        if parent_uid:
-                            parent_sender_nickname = get_cached_nickname(parent_uid)
-                except Exception as e:
-                    print(f"  > [归档] 获取被回复者信息失败: {e}")
-
-            # 转换内容（带发送者和时间，以及是否是回复）
-            # 如果匹配到了具体标签（非"默认"），则通知 convert 移除该标签
-            tag_to_remove = matched_tag if matched_tag != "默认" else None
             
-            blocks = docx_converter.convert(
-                message.content, message.message_id, target_doc_token,
-                sender_name=sender_nickname, send_time=send_time, 
-                is_reply=is_reply, parent_sender_name=parent_sender_nickname,
-                remove_tag=tag_to_remove
-            )
-            # 写入文档（回复消息需要插入在分割线之前）
-            docx_storage.add_blocks(target_doc_token, blocks, insert_before_divider=is_reply)
-            print(f"  > [归档] ✅ 群消息已同步 (回复: {is_reply}, Doc: {target_doc_token[-6:]})")
+            # 新增: 跳过无标签消息
+            if matched_tag == "默认":
+                print(f"  > [归档] 跳过无标签消息")
+            else:
+                # 获取被回复者的昵称（仅针对嵌套回复）
+                parent_sender_nickname = None
+                if is_reply and message.parent_id and message.root_id and message.parent_id != message.root_id:
+                    try:
+                        # 获取父消息详情
+                        parent_msg = collector.get_message_detail(message.parent_id)
+                        if parent_msg:
+                            # 提取父消息发送者ID
+                            parent_sender = parent_msg.get("sender", {})
+                            parent_sender_id_obj = parent_sender.get("sender_id", {})
+                            # API 返回的 sender_id 对象可能是字典
+                            parent_uid = parent_sender_id_obj.get("user_id") or \
+                                       parent_sender_id_obj.get("open_id") or \
+                                       parent_sender_id_obj.get("union_id")
+                            
+                            if parent_uid:
+                                parent_sender_nickname = get_cached_nickname(parent_uid)
+                    except Exception as e:
+                        print(f"  > [归档] 获取被回复者信息失败: {e}")
+
+                # 转换内容（带发送者和时间，以及是否是回复）
+                # 如果匹配到了具体标签（非"默认"），则通知 convert 移除该标签
+                tag_to_remove = matched_tag if matched_tag != "默认" else None
+                
+                blocks = docx_converter.convert(
+                    message.content, message.message_id, target_doc_token,
+                    sender_name=sender_nickname, send_time=send_time, 
+                    is_reply=is_reply, parent_sender_name=parent_sender_nickname,
+                    remove_tag=tag_to_remove
+                )
+                # 写入文档（回复消息需要插入在分割线之前）
+                docx_storage.add_blocks(target_doc_token, blocks, insert_before_divider=is_reply)
+                print(f"  > [归档] ✅ 群消息已同步 (标签: {matched_tag}, Doc: {target_doc_token[-6:]})")
         except Exception as e:
             print(f"  > [归档] ❌ 同步失败: {e}")
             import traceback
@@ -286,36 +378,18 @@ def do_p2_im_message_receive_v1(data: lark.im.v1.P2ImMessageReceiveV1) -> None:
     # 3. 获取发送者昵称
     user_name = get_cached_nickname(sender_id)
 
-    # [Bitable归档] 恢复功能：归档消息到 Bitable (双表格模式)
-    try:
-        # 处理附件
-        file_tokens_for_db, text_content_for_db = _process_message_attachments(message, message.message_id)
-        
-        # 准备时间字段
-        create_time_ms = int(message.create_time)
-        dt_object = datetime.fromtimestamp(create_time_ms / 1000)
-        month_str = dt_object.strftime("%Y-%m")
-        
-        # 1. 归档到消息明细表
-        archive_fields = _build_archive_fields(
-            message, sender_id, user_name, text_content_for_db,
-            file_tokens_for_db, month_str, create_time_ms
-        )
-        if hasattr(archive_storage, "save_message"):
-            archive_storage.save_message(archive_fields)
-            print(f"  > [Bitable] ✅ 消息已存入数据库")
-
-        # 2. 更新话题汇总表
-        real_root_id = message.root_id or message.message_id
-        
-        _update_topic_summary(
-            message, sender_id, user_name, text_content_for_db,
-            real_root_id, month_str, create_time_ms
-        )
-        print(f"  > [Bitable] ✅ 话题概要已更新")
-
-    except Exception as e:
-        print(f"  > [Bitable] ❌ 归档失败: {e}")
+    # [Bitable归档] 已禁用: 归档消息到 Bitable (双表格模式)
+    # try:
+    #     file_tokens_for_db, text_content_for_db = _process_message_attachments(message, message.message_id)
+    #     create_time_ms = int(message.create_time)
+    #     dt_object = datetime.fromtimestamp(create_time_ms / 1000)
+    #     month_str = dt_object.strftime("%Y-%m")
+    #     archive_fields = _build_archive_fields(...)
+    #     if hasattr(archive_storage, "save_message"):
+    #         archive_storage.save_message(archive_fields)
+    #     _update_topic_summary(...)
+    # except Exception as e:
+    #     print(f"  > [Bitable] ❌ 归档失败: {e}")
 
     # 4. 构建指标增量
     metrics_delta = {
@@ -326,57 +400,55 @@ def do_p2_im_message_receive_v1(data: lark.im.v1.P2ImMessageReceiveV1) -> None:
         "topic_initiated": 1 if not message.root_id else 0,
     }
 
-    # 5. 更新多维表格
-    try:
-        print(f"实时更新: {user_name} (字数: {char_count})")
-        storage.update_or_create_record(sender_id, user_name, metrics_delta)
+    # 5. 累积到批量更新字典 (替代原来的实时更新)
+    global message_counter
+    accumulate_metrics(sender_id, user_name, metrics_delta)
 
-        # 6. 特殊逻辑：处理被回复的情况
-        parent_id = message.parent_id
-        root_id = message.root_id
-        already_credited_ids = set()  # 记录本消息中已经获得“被回复”积分的人
+    # 6. 特殊逻辑：处理被回复的情况
+    parent_id = message.parent_id
+    root_id = message.root_id
+    already_credited_ids = set()  # 记录本消息中已经获得"被回复"积分的人
 
-        if parent_id:
-            # 识别目标用户 ID (target_parent_id)
-            target_parent_id = None
+    if parent_id:
+        # 识别目标用户 ID (target_parent_id)
+        target_parent_id = None
 
-            # 启发式逻辑：在话题群中，parent_id 和 root_id 通常相同且指向话题头
-            if parent_id == root_id and message.mentions:
-                target_parent_id = message.mentions[0].id.open_id
-                print(f"  > [探测] 识别到话题嵌套回复: 使用首个艾特对象 {target_parent_id}")
-            else:
-                # 普通群或直接回复话题，使用父消息发送者
-                target_parent_id = collector.get_message_sender(parent_id)
+        # 启发式逻辑：在话题群中，parent_id 和 root_id 通常相同且指向话题头
+        if parent_id == root_id and message.mentions:
+            target_parent_id = message.mentions[0].id.open_id
+            print(f"  > [探测] 识别到话题嵌套回复: 使用首个艾特对象 {target_parent_id}")
+        else:
+            # 普通群或直接回复话题，使用父消息发送者
+            target_parent_id = collector.get_message_sender(parent_id)
 
-            if target_parent_id:
-                # 获取被回复者昵称
-                target_user_name = get_cached_nickname(target_parent_id)
-                print(f"  > [更新] 增加被回复数给: {target_user_name}")
-                storage.update_or_create_record(
-                    target_parent_id, target_user_name, {"reply_received": 1}
-                )
-                already_credited_ids.add(target_parent_id)
+        if target_parent_id:
+            # 获取被回复者昵称并累积
+            target_user_name = get_cached_nickname(target_parent_id)
+            print(f"  > [更新] 增加被回复数给: {target_user_name}")
+            accumulate_metrics(target_parent_id, target_user_name, {"reply_received": 1})
+            already_credited_ids.add(target_parent_id)
 
-        # 7. 处理被 @ 的人
-        if message.mentions:
-            for mention in message.mentions:
-                mentioned_id = mention.id.open_id
-                if mentioned_id:
-                    # 如果该用户刚才已经因为“被回复”加过分了，这次 @ 就跳过，避免重复计费
-                    if mentioned_id in already_credited_ids:
-                        print(f"  > [跳过] {mentioned_id} 已在本次统计中作为被回复者，跳过艾特计费")
-                        continue
+    # 7. 处理被 @ 的人
+    if message.mentions:
+        for mention in message.mentions:
+            mentioned_id = mention.id.open_id
+            if mentioned_id:
+                # 如果该用户刚才已经因为"被回复"加过分了，这次 @ 就跳过，避免重复计费
+                if mentioned_id in already_credited_ids:
+                    print(f"  > [跳过] {mentioned_id} 已在本次统计中作为被回复者，跳过艾特计费")
+                    continue
 
-                    mentioned_name = get_cached_nickname(mentioned_id)
-                    print(f"  > [更新] 增加被艾特数给: {mentioned_name}")
-                    storage.update_or_create_record(
-                        mentioned_id, mentioned_name, {"mention_received": 1}
-                    )
+                mentioned_name = get_cached_nickname(mentioned_id)
+                print(f"  > [更新] 增加被艾特数给: {mentioned_name}")
+                accumulate_metrics(mentioned_id, mentioned_name, {"mention_received": 1})
 
-        print("✅ 实时同步圆满成功")
+    # 8. 检查是否需要批量更新
+    message_counter += 1
+    if message_counter >= BATCH_UPDATE_THRESHOLD:
+        flush_pending_updates()
+        message_counter = 0
 
-    except Exception as e:
-        print(f"❌ 实时更新失败: {e}")
+    print("✅ 消息处理完成")
 
 
 def _process_message_attachments(message, message_id: str) -> list:
@@ -732,6 +804,14 @@ def main():
                 pin_monitor.start()
                 health_monitor.set_pin_monitor_status(True)
             
+            # 启动 Pin 周报调度器 (后台线程,集成到主进程)
+            print("\n📅 启动 Pin 周报调度器...")
+            try:
+                start_pin_scheduler()
+            except Exception as e:
+                print(f"⚠️  Pin 周报调度器启动失败: {e}")
+                print("⚠️  将继续运行,但 Pin 周报功能不可用")
+            
             # 初始化长连接客户端
             cli = lark.ws.Client(
                 APP_ID, 
@@ -802,6 +882,13 @@ def main():
                         health_monitor.set_pin_monitor_status(False)
                 except Exception as e:
                     print(f"⚠️ 停止Pin监控时出错: {e}")
+            
+            # 停止 Pin 周报调度器
+            try:
+                print("🚦 正在停止 Pin 周报调度器...")
+                stop_pin_scheduler()
+            except Exception as e:
+                print(f"⚠️  停止 Pin 周报调度器时出错: {e}")
     
     # ========== 4. 清理和退出 ==========
     print("\n" + "=" * 60)
