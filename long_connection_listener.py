@@ -1,5 +1,7 @@
 import os
 import json
+import threading
+from pathlib import Path
 from dotenv import load_dotenv
 import lark_oapi as lark
 from lark_oapi.api.im.v1 import *
@@ -11,14 +13,19 @@ from calculator import MetricsCalculator
 from storage import BitableStorage, MessageArchiveStorage
 from collector import MessageCollector
 from config import CACHE_USER_NAME_SIZE, CACHE_EVENT_SIZE, TOPIC_ACTIVE_DAYS, TOPIC_SILENT_DAYS
-from pin_monitor import PinMonitor
 from reply_card import DocCardProcessor
-from utils import LRUCache
+from utils import ThreadSafeLRUCache
 from storage import DocxStorage
 from message_renderer import MessageToDocxConverter
 from pin_scheduler import start_pin_scheduler, stop_pin_scheduler
 
-load_dotenv()
+# 加载环境变量 (支持新的 config/ 目录)
+env_path = Path(__file__).parent / "config" / ".env"
+if env_path.exists():
+    load_dotenv(env_path)
+else:
+    # 向后兼容：如果 config/.env 不存在，尝试根目录
+    load_dotenv()
 
 # 初始化配置
 APP_ID = os.getenv("APP_ID")
@@ -125,16 +132,17 @@ def get_target_doc_token(message):
     return target_token, matched_tag
 
 
-# 用户昵称缓存 - 使用LRU防止内存泄漏
-user_name_cache = LRUCache(capacity=CACHE_USER_NAME_SIZE)
+# 用户昵称缓存 - 使用线程安全LRU防止内存泄漏
+user_name_cache = ThreadSafeLRUCache(capacity=CACHE_USER_NAME_SIZE)
 
-# 事件去重缓存 - 使用LRU防止内存泄漏
-processed_events = LRUCache(capacity=CACHE_EVENT_SIZE)
+# 事件去重缓存 - 使用线程安全LRU防止内存泄漏
+processed_events = ThreadSafeLRUCache(capacity=CACHE_EVENT_SIZE)
 
 # 批量更新配置
 BATCH_UPDATE_THRESHOLD = 3  # 每 3 条消息更新一次
 message_counter = 0
 pending_updates = {}  # {user_id: {"user_name": str, "metrics": dict}}
+pending_updates_lock = threading.Lock()  # 锁保护多线程访问
 
 
 def get_cached_nickname(user_id):
@@ -156,47 +164,52 @@ def get_cached_nickname(user_id):
 
 
 def accumulate_metrics(user_id: str, user_name: str, metrics_delta: dict):
-    """累积用户指标到待更新字典"""
-    global pending_updates
-    
-    if user_id not in pending_updates:
-        pending_updates[user_id] = {
-            "user_name": user_name,
-            "metrics": {
-                "message_count": 0,
-                "char_count": 0,
-                "reply_received": 0,
-                "mention_received": 0,
-                "topic_initiated": 0,
+    """累积用户指标到待更新字典（线程安全）"""
+    global pending_updates, pending_updates_lock
+
+    with pending_updates_lock:
+        if user_id not in pending_updates:
+            pending_updates[user_id] = {
+                "user_name": user_name,
+                "metrics": {
+                    "message_count": 0,
+                    "char_count": 0,
+                    "reply_received": 0,
+                    "mention_received": 0,
+                    "topic_initiated": 0,
+                }
             }
-        }
-    
-    # 累加指标
-    for key, value in metrics_delta.items():
-        if key in pending_updates[user_id]["metrics"]:
-            pending_updates[user_id]["metrics"][key] += value
+
+        # 累加指标
+        for key, value in metrics_delta.items():
+            if key in pending_updates[user_id]["metrics"]:
+                pending_updates[user_id]["metrics"][key] += value
 
 
 def flush_pending_updates():
-    """批量更新所有待处理的用户统计"""
-    global pending_updates
-    
-    if not pending_updates:
-        return
-    
-    print(f"📊 批量更新 {len(pending_updates)} 个用户的统计数据...")
-    
-    for user_id, data in pending_updates.items():
+    """批量更新所有待处理的用户统计（线程安全）"""
+    global pending_updates, pending_updates_lock
+
+    with pending_updates_lock:
+        if not pending_updates:
+            return
+
+        # 复制待更新数据并清空原字典（减少锁持有时间）
+        updates_to_process = pending_updates.copy()
+        pending_updates = {}
+
+    print(f"📊 批量更新 {len(updates_to_process)} 个用户的统计数据...")
+
+    for user_id, data in updates_to_process.items():
         try:
             storage.update_or_create_record(
-                user_id, 
-                data["user_name"], 
+                user_id,
+                data["user_name"],
                 data["metrics"]
             )
         except Exception as e:
             print(f"❌ 更新 {data['user_name']} 失败: {e}")
-    
-    pending_updates = {}
+
     print("✅ 批量更新完成")
 
 
@@ -758,7 +771,7 @@ def main():
     1. 环境变量验证
     2. 健康检查HTTP服务
     3. 自动重连机制
-    4. Pin监控（可选）
+    4. 每日 Pin 审计 + 月度归档调度
     """
     import time
     from env_validator import validate_environment
@@ -785,32 +798,18 @@ def main():
     max_retries = int(os.getenv("MAX_RETRIES", 10))  # 最大重试次数
     retry_delay = int(os.getenv("RETRY_DELAY", 30))  # 重试延迟（秒）
     
-    pin_monitor = None
-    
     while retry_count < max_retries:
         try:
-            # 初始化Pin监控（每次重连都重新初始化）
-            pin_table_id = os.getenv("PIN_TABLE_ID")
-            pin_interval = int(os.getenv("PIN_MONITOR_INTERVAL", 30))
-            
-            if pin_table_id and not pin_monitor:
-                print(f"🔍 Pin监控已启用 (轮询间隔: {pin_interval}秒)")
-                # 注入精华文档归档配置
-                essence_doc_token = os.getenv("ESSENCE_DOC_TOKEN")
-                pin_monitor = PinMonitor(
-                    auth, storage, CHAT_ID, interval=pin_interval,
-                    docx_storage=docx_storage, essence_doc_token=essence_doc_token
-                )
-                pin_monitor.start()
-                health_monitor.set_pin_monitor_status(True)
-            
-            # 启动 Pin 周报调度器 (后台线程,集成到主进程)
-            print("\n📅 启动 Pin 周报调度器...")
+            # 不启用秒级 Pin 轮询，状态置为 false
+            health_monitor.set_pin_monitor_status(False)
+
+            # 启动 每日 Pin 审计 & 月度归档调度器 (后台线程,集成到主进程)
+            print("\n📅 启动 每日 Pin 审计 & 月度归档调度器...")
             try:
-                start_pin_scheduler()
+                start_pin_scheduler(auth)
             except Exception as e:
-                print(f"⚠️  Pin 周报调度器启动失败: {e}")
-                print("⚠️  将继续运行,但 Pin 周报功能不可用")
+                print(f"⚠️  调度器启动失败: {e}")
+                print("⚠️  将继续运行,但 每日 Pin 审计和月度归档功能不可用")
             
             # 初始化长连接客户端
             cli = lark.ws.Client(
@@ -871,24 +870,12 @@ def main():
             retry_delay = min(retry_delay * 2, 60)
         
         finally:
-            # 无论如何都确保Pin监控被停止
-            if pin_monitor:
-                try:
-                    # 只在最终退出时停止Pin监控
-                    if retry_count >= max_retries or KeyboardInterrupt:
-                        print("正在停止Pin监控...")
-                        pin_monitor.stop()
-                        pin_monitor = None
-                        health_monitor.set_pin_monitor_status(False)
-                except Exception as e:
-                    print(f"⚠️ 停止Pin监控时出错: {e}")
-            
-            # 停止 Pin 周报调度器
+            # 停止每日 Pin 审计 & 月度归档调度器
             try:
-                print("🚦 正在停止 Pin 周报调度器...")
+                print("🚦 正在停止 每日 Pin 审计调度器...")
                 stop_pin_scheduler()
             except Exception as e:
-                print(f"⚠️  停止 Pin 周报调度器时出错: {e}")
+                print(f"⚠️  停止调度器时出错: {e}")
     
     # ========== 4. 清理和退出 ==========
     print("\n" + "=" * 60)

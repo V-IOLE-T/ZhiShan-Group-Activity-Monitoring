@@ -56,3 +56,54 @@ API_TIMEOUT = 10  # API请求超时时间（秒）
 
 # ========== 分页延迟配置 ==========
 PAGE_SLEEP_TIME = 0.1  # 翻页间隔时间（秒），避免请求过快
+
+
+# ========== API端点常量 ==========
+class FeishuAPIEndpoints:
+    """
+    飞书 API 端点常量
+
+    集中管理所有飞书 API 的 URL 端点，避免硬编码
+    使用格式：BASE_URL + 具体路径
+    """
+    BASE_URL = "https://open.feishu.cn/open-apis"
+
+    # 认证相关
+    AUTH = "/auth/v3/tenant_access_token/internal"
+
+    # 消息相关
+    MESSAGES = "/im/v1/messages"
+    MESSAGES_SEND = f"{BASE_URL}{MESSAGES}"
+    MESSAGE_GET = f"{BASE_URL}{MESSAGES}/{{message_id}}"
+
+    # Pin 相关
+    PINS = "/im/v1/pins"
+    PINS_URL = f"{BASE_URL}{PINS}"
+
+    # 用户相关
+    USER_INFO = "/contact/v3/users"
+    USER_INFO_URL = f"{BASE_URL}{USER_INFO}/{{user_id}}"
+    BATCH_USER_INFO = "/contact/v3/users/batch_get"
+    BATCH_USER_INFO_URL = f"{BASE_URL}{BATCH_USER_INFO}"
+
+    # 群组相关
+    CHAT_MEMBERS = "/im/v1/chats/{{chat_id}}/members"
+    CHAT_MEMBERS_URL = f"{BASE_URL}{CHAT_MEMBERS}"
+
+    # 文件/资源相关
+    IMAGES = "/im/v1/images"
+    IMAGES_UPLOAD = f"{BASE_URL}{IMAGES}"
+    RESOURCES = "/im/v1/resources/{{resource_key}}"
+    FILES_DOWNLOAD = "/drive/v1/files/{{file_key}}/download"
+
+    # Drive 相关
+    DRIVE_UPLOAD = "/drive/v1/medias/upload_all"
+    DRIVE_UPLOAD_URL = f"{BASE_URL}{DRIVE_UPLOAD}"
+
+    # Docx 相关
+    DOCX_BLOCKS = "/docx/v1/documents/{{doc_token}}/blocks/{{parent_id}}/children"
+    DOCX_BATCH_UPDATE = "/docx/v1/documents/{{doc_token}}/blocks/batch_update"
+
+    # Bitable 相关
+    BITABLE_RECORDS = "/bitable/v1/apps/{{app_token}}/tables/{{table_id}}/records"
+    BITABLE_RECORDS_SEARCH = f"{BASE_URL}/bitable/v1/apps/{{app_token}}/tables/{{table_id}}/records/search"

@@ -1,0 +1,50 @@
+# 资源索引 — 仓库、基础设施、部署配置
+#
+# 此文件由 Agent 在首次启动时根据用户描述自动生成。
+# 格式参考如下，Agent 会根据实际情况填充。
+
+# ==================== GitHub 组织 / 用户 ====================
+# organization:
+#   name: your-org
+#   url: https://github.com/your-org
+#   project_board:
+#     number: 1
+#     url: https://github.com/orgs/your-org/projects/1
+
+# ==================== 仓库列表 ====================
+# repos:
+#   backend:
+#     path: repos/backend
+#     git: https://github.com/your-org/backend.git
+#     desc: 后端服务
+#     lang: TypeScript
+#     status: active
+#     worktrees:
+#       convention: "repos/backend-<feature-name>"
+#
+#   frontend:
+#     path: repos/frontend
+#     git: https://github.com/your-org/frontend.git
+#     desc: 前端应用
+#     lang: TypeScript
+#     status: active
+
+# ==================== 基础设施 ====================
+# infrastructure:
+#   databases:
+#     postgres:
+#       host: localhost
+#       port: 5432
+#       user: postgres
+#       databases:
+#         - myapp
+#
+#   cache:
+#     redis:
+#       host: localhost
+#       port: 6379
+#
+#   deploy:
+#     method: CI / webhook / manual
+#     trigger: push to main
+#     provider: GitHub Actions / fly.io / Vercel / ...

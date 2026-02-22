@@ -10,6 +10,23 @@
 
 ---
 
+## Docker 快速部署（路径已修正）
+
+在项目根目录执行：
+
+```bash
+docker compose -f deployment/docker-compose.yml up -d --build
+```
+
+说明：
+
+- Compose 文件位于 `deployment/docker-compose.yml`
+- 环境变量文件读取 `config/.env`
+- 日志挂载目录为 `logs/`
+- Dockerfile 使用 `deployment/Dockerfile`
+
+---
+
 ## 部署步骤
 
 ### 1️⃣ 安装中文字体

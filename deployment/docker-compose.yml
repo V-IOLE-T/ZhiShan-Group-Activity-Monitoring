@@ -2,13 +2,15 @@ version: '3.8'
 
 services:
   feishu-monitor:
-    build: .
+    build:
+      context: ..
+      dockerfile: deployment/Dockerfile
     container_name: feishu-activity-monitor
     restart: always
     env_file:
-      - .env
+      - ../config/.env
     volumes:
-      - ./logs:/app/logs
+      - ../logs:/app/logs
     logging:
       driver: "json-file"
       options:

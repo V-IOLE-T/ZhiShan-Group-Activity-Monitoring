@@ -6,7 +6,23 @@
       "Bash(python -c:*)",
       "Bash(python -m pytest tests/test_rate_limiter.py -v)",
       "Bash(python test_rate_limiter.py:*)",
-      "Bash(python -m unittest:*)"
+      "Bash(python -m unittest:*)",
+      "Bash(ver)",
+      "Bash(where:*)",
+      "Bash(npm install:*)",
+      "Bash(openspec:*)",
+      "Bash(gemini:*)",
+      "Bash(gemini --help:*)",
+      "Bash(ls:*)",
+      "Bash(dir:*)",
+      "Skill(opsx:apply)",
+      "Bash(pytest:*)",
+      "Skill(codex-agent)",
+      "Bash(pwsh:*)",
+      "Bash(/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe:*)",
+      "Bash(export PATH=\"/c/Users/ASUS/AppData/Roaming/npm:$PATH\")",
+      "Bash(codex:*)",
+      "Bash(python -m pytest:*)"
     ]
   }
 }
