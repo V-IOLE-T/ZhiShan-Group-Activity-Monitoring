@@ -138,6 +138,38 @@
 - **THEN** 返回 `None`
 - **AND** 日志输出 "❌ 图片上传失败，已重试 2 次"
 
+## Property-Based Testing Properties
+
+### [IDEMPOTENCY] File Upload Retry
+**Property**: Retrying failed upload with same file data produces consistent outcome
+- **FALSIFICATION STRATEGY**: Inject transient network errors:
+  - First attempt: fails with network error
+  - Retry attempt (with exponential backoff): either succeeds or fails consistently
+  - No partial uploads or orphaned blocks after retries exhausted
+
+### [INVARIANT] Three-Step Upload Atomicity
+**Property**: Image upload follows strict sequence: create Block → upload data → batch_update
+- **FALSIFICATION STRATEGY**: Fail at each step randomly:
+  - Step 1 failure: no Block created, no subsequent steps
+  - Step 2 failure: empty Block exists (cleaned up later), no batch_update
+  - Step 3 failure: image uploaded but not attached (logged)
+  - Never skip steps or execute out of order
+
+### [BOUNDS] Rate Limit Adherence
+**Property**: Never exceeds 20 API calls per 60-second window
+- **FALSIFICATION STRATEGY**: Rapidly trigger 30 uploads within 30 seconds:
+  - First 20: execute immediately
+  - Calls 21-30: automatically throttled (wait until window resets)
+  - No HTTP 429 errors from API
+  - Log shows "⚠️ API限流中，等待 X秒..." for throttled calls
+
+### [ROUND-TRIP] File Type Validation
+**Property**: Magic bytes detection matches actual file type regardless of extension
+- **FALSIFICATION STRATEGY**: Rename files with wrong extensions:
+  - JPG file renamed to `.exe`: rejected (magic bytes reveal true type)
+  - Actual `.exe` file: rejected regardless of extension
+  - Valid JPG/PNG/GIF: accepted regardless of extension mismatch
+
 ## REMOVED Requirements
 
 ### Requirement: 分散的文件上传实现

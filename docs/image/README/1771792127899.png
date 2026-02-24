@@ -1,7 +1,5 @@
 import os
 import json
-import threading
-from pathlib import Path
 from dotenv import load_dotenv
 import lark_oapi as lark
 from lark_oapi.api.im.v1 import *
@@ -13,25 +11,16 @@ from calculator import MetricsCalculator
 from storage import BitableStorage, MessageArchiveStorage
 from collector import MessageCollector
 from config import CACHE_USER_NAME_SIZE, CACHE_EVENT_SIZE, TOPIC_ACTIVE_DAYS, TOPIC_SILENT_DAYS
+from pin_monitor import PinMonitor
 from reply_card import DocCardProcessor
-from utils import ThreadSafeLRUCache
-from storage import DocxStorage
-from message_renderer import MessageToDocxConverter
-from pin_scheduler import start_pin_scheduler, stop_pin_scheduler
+from utils import LRUCache
 
-# 加载环境变量 (支持新的 config/ 目录)
-env_path = Path(__file__).parent / "config" / ".env"
-if env_path.exists():
-    load_dotenv(env_path)
-else:
-    # 向后兼容：如果 config/.env 不存在，尝试根目录
-    load_dotenv()
+load_dotenv()
 
 # 初始化配置
 APP_ID = os.getenv("APP_ID")
 APP_SECRET = os.getenv("APP_SECRET")
 CHAT_ID = os.getenv("CHAT_ID")
-ARCHIVE_DOC_TOKEN = os.getenv("ARCHIVE_DOC_TOKEN")
 
 # 初始化组件
 auth = FeishuAuth()
@@ -40,109 +29,13 @@ archive_storage = MessageArchiveStorage(auth)
 collector = MessageCollector(auth)
 calculator = MetricsCalculator([])
 doc_processor = DocCardProcessor(auth)
-docx_storage = DocxStorage(auth)
-docx_converter = MessageToDocxConverter(docx_storage)
 
 
-# 标签映射配置
-TAG_MAPPING = {
-    "问答": os.getenv("DOC_TOKEN_TAG_QA"),
-    "打卡": os.getenv("DOC_TOKEN_TAG_CHECKIN"),
-    "雅思": os.getenv("DOC_TOKEN_TAG_ENGLISH"), 
-    "英语学习": os.getenv("DOC_TOKEN_TAG_ENGLISH"),
-    "雅思/英语学习": os.getenv("DOC_TOKEN_TAG_ENGLISH"),
-    "AI实用分享": os.getenv("DOC_TOKEN_TAG_AI"),
-    "写作运营": os.getenv("DOC_TOKEN_TAG_OPS"),
-    "沟通场景/技巧": os.getenv("DOC_TOKEN_TAG_COMM"),
-    "个人思考": os.getenv("DOC_TOKEN_TAG_THINKING"),
-    "攻略分享": os.getenv("DOC_TOKEN_TAG_GUIDE"),
-}
+# 用户昵称缓存 - 使用LRU防止内存泄漏
+user_name_cache = LRUCache(capacity=CACHE_USER_NAME_SIZE)
 
-def get_target_doc_token(message):
-    """根据消息内容获取目标文档 Token"""
-    
-    # 1. 确定要检查的内容
-    # 如果是回复消息，需要检查根消息的内容来确定归档位置
-    check_content_str = message.content
-    is_reply = bool(message.parent_id or message.root_id)
-    
-    if is_reply and message.root_id:
-        # 尝试获取根消息内容
-        # print(f"  > [路由] 这是一条回复消息，正在获取根消息 {message.root_id} 以确定标签...")
-        try:
-            root_msg = collector.get_message_detail(message.root_id)
-            if root_msg:
-                # root_msg['body']['content'] 是 JSON 字符串
-                check_content_str = root_msg.get("body", {}).get("content", "")
-        except Exception as e:
-            print(f"  > [路由] 获取根消息失败: {e}")
-            
-    # 2. 提取纯文本用于标签匹配
-    # 使用 MetricsCalculator 提取文本，或者简单解析
-    plain_text = ""
-    try:
-        # 尝试复用现有的提取逻辑，或者简单实现
-        if check_content_str:
-            # 简单解析：尝试提取 text 字段
-            try:
-                content_obj = json.loads(check_content_str)
-                # 递归提取所有 text 字段
-                def extract_text(obj):
-                    texts = []
-                    if isinstance(obj, dict):
-                        for k, v in obj.items():
-                            if k == 'text' and isinstance(v, str):
-                                texts.append(v)
-                            else:
-                                texts.extend(extract_text(v))
-                    elif isinstance(obj, list):
-                        for item in obj:
-                            texts.extend(extract_text(item))
-                    return texts
-                
-                texts = extract_text(content_obj)
-                plain_text = " ".join(texts)
-            except:
-                plain_text = check_content_str # Fallback
-    except Exception as e:
-        print(f"  > [路由] 解析文本失败: {e}")
-        plain_text = check_content_str
-
-    # 3. 检查标签
-    # 默认使用 ARCHIVE_DOC_TOKEN (如果没有配置，且没匹配到标签，则返回 None)
-    target_token = ARCHIVE_DOC_TOKEN or None
-    matched_tag = "默认"
-    
-    if plain_text:
-        # 优先匹配长标签
-        sorted_tags = sorted(TAG_MAPPING.keys(), key=len, reverse=True)
-        
-        for tag in sorted_tags:
-            token = TAG_MAPPING.get(tag)
-            if not token: continue 
-            
-            # 检查 #标签
-            search_key = f"#{tag}"
-            if search_key in plain_text:
-                target_token = token
-                matched_tag = tag
-                break
-                
-    # print(f"  > [路由] 标签: {matched_tag} -> 文档: {target_token}")
-    return target_token, matched_tag
-
-
-# 用户昵称缓存 - 使用线程安全LRU防止内存泄漏
-user_name_cache = ThreadSafeLRUCache(capacity=CACHE_USER_NAME_SIZE)
-
-# 事件去重缓存 - 使用线程安全LRU防止内存泄漏
-processed_events = ThreadSafeLRUCache(capacity=CACHE_EVENT_SIZE)
-
-# 批量更新配置
-BATCH_UPDATE_THRESHOLD = 3  # 每 3 条消息更新一次
-message_counter = 0
-pending_updates = {}  # {user_id: {"user_name": str, "metrics": dict}}
-pending_updates_lock = threading.Lock()  # 锁保护多线程访问
+# 事件去重缓存 - 使用LRU防止内存泄漏
+processed_events = LRUCache(capacity=CACHE_EVENT_SIZE)
 
 
 def get_cached_nickname(user_id):
@@ -161,56 +54,6 @@ def get_cached_nickname(user_id):
             user_name_cache.set(uid, name)
 
     return user_name_cache.get(user_id, user_id)
-
-
-def accumulate_metrics(user_id: str, user_name: str, metrics_delta: dict):
-    """累积用户指标到待更新字典（线程安全）"""
-    global pending_updates, pending_updates_lock
-
-    with pending_updates_lock:
-        if user_id not in pending_updates:
-            pending_updates[user_id] = {
-                "user_name": user_name,
-                "metrics": {
-                    "message_count": 0,
-                    "char_count": 0,
-                    "reply_received": 0,
-                    "mention_received": 0,
-                    "topic_initiated": 0,
-                }
-            }
-
-        # 累加指标
-        for key, value in metrics_delta.items():
-            if key in pending_updates[user_id]["metrics"]:
-                pending_updates[user_id]["metrics"][key] += value
-
-
-def flush_pending_updates():
-    """批量更新所有待处理的用户统计（线程安全）"""
-    global pending_updates, pending_updates_lock
-
-    with pending_updates_lock:
-        if not pending_updates:
-            return
-
-        # 复制待更新数据并清空原字典（减少锁持有时间）
-        updates_to_process = pending_updates.copy()
-        pending_updates = {}
-
-    print(f"📊 批量更新 {len(updates_to_process)} 个用户的统计数据...")
-
-    for user_id, data in updates_to_process.items():
-        try:
-            storage.update_or_create_record(
-                user_id,
-                data["user_name"],
-                data["metrics"]
-            )
-        except Exception as e:
-            print(f"❌ 更新 {data['user_name']} 失败: {e}")
-
-    print("✅ 批量更新完成")
 
 
 def do_p2_im_message_receive_v1(data: lark.im.v1.P2ImMessageReceiveV1) -> None:
@@ -253,130 +96,76 @@ def do_p2_im_message_receive_v1(data: lark.im.v1.P2ImMessageReceiveV1) -> None:
 
     # 情况 A：如果是单聊（P2P），处理文档链接或纯文本
     if is_p2p:
-        print(f"  > [单聊] 收到单聊消息，准备处理...")
+        print(f"  > [单聊] 检测到单聊消息，开始处理...")
+        text_content, _ = MetricsCalculator.extract_text_from_content(message.content)
+        print(f"  > [单聊] 提取的文本内容: {text_content[:100]}...")
+        
         try:
-            # 优先复用已验证稳定的提取逻辑
-            message_text, _ = MetricsCalculator.extract_text_from_content(message.content)
-            message_text = (message_text or "").strip()
-
-            # 先尝试按文档链接处理（与 1.py 行为一致）
-            processed = doc_processor.process_and_reply(message_text, message.chat_id)
-
-            # 兜底：部分消息结构里链接只存在于原始 JSON 文本中
-            if not processed and message.content and message.content != message_text:
-                processed = doc_processor.process_and_reply(message.content, message.chat_id)
-
+            # 优先尝试识别文档链接
+            processed = doc_processor.process_and_reply(text_content, message.chat_id)
             if processed:
-                print(f"  > [单聊] ✅ 文档链接处理成功")
-            elif message_text:
-                # 纯文本消息，使用白卡样式（不显示标题栏）
-                print(f"  > [单聊] 收到纯文本: {message_text[:50]}...")
-                try:
-                    from reply_card.card_style_generator import CardStyleImageGenerator
-                    generator = CardStyleImageGenerator()
-                    image_data = generator.generate_card_image("", message_text)
-                    doc_processor._send_image_reply(message.chat_id, image_data)
-                    print(f"  > [单聊] ✅ 纯文本图片发送成功")
-                except Exception as e:
-                    print(f"  > [单聊] ❌ 图片生成失败: {e}")
-                    import traceback
-                    traceback.print_exc()
+                print(f"  > [MCP] 单聊文档提取已完成")
             else:
-                print(f"  > [单聊] 消息内容为空或非文本类型，跳过")
+                # 如果不是文档链接，检查是否为纯文本（长度大于10字符）
+                if len(text_content.strip()) > 10:
+                    print(f"  > [文本转图] 未检测到文档链接，尝试将文本转为图片...")
+                    from reply_card.card_style_generator import CardStyleImageGenerator
+                    import requests
+                    import json
+                    
+                    # 文字消息：保持标题为空，消息全部作为正文
+                    title = ""
+                    content_for_image = text_content
+                    
+                    # 生成图片
+                    generator = CardStyleImageGenerator()
+                    image_data = generator.generate_card_image(title, content_for_image)
+                    
+                    # 上传并发送图片
+                    upload_url = "https://open.feishu.cn/open-apis/im/v1/images"
+                    token = auth.get_tenant_access_token()
+                    upload_headers = {"Authorization": f"Bearer {token}"}
+                    files = {'image': ('text_preview.png', image_data, 'image/png')}
+                    data = {'image_type': 'message'}
+                    
+                    upload_response = requests.post(upload_url, headers=upload_headers, files=files, data=data, timeout=10)
+                    
+                    if upload_response.status_code == 200:
+                        result = upload_response.json()
+                        if result.get("code") == 0:
+                            image_key = result["data"]["image_key"]
+                            
+                            # 发送图片消息
+                            send_url = "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id"
+                            send_headers = auth.get_headers()
+                            payload = {
+                                "receive_id": message.chat_id,
+                                "msg_type": "image",
+                                "content": json.dumps({"image_key": image_key})
+                            }
+                            send_response = requests.post(send_url, headers=send_headers, json=payload, timeout=10)
+                            
+                            if send_response.status_code == 200:
+                                print(f"  > [文本转图] ✅ 文本预览图片发送成功")
+                            else:
+                                print(f"  > [文本转图] ❌ 图片发送失败: {send_response.text}")
+                        else:
+                            print(f"  > [文本转图] ❌ 图片上传失败: {result}")
+                    else:
+                        print(f"  > [文本转图] ❌ 上传请求失败: {upload_response.status_code}")
+                else:
+                    print(f"  > [MCP] 文本过短，跳过处理")
         except Exception as e:
-            print(f"  > [单聊] 处理异常: {e}")
+            print(f"  > [MCP] 单聊消息处理异常: {e}")
             import traceback
             traceback.print_exc()
-        
-        return  # 单聊处理完毕，不参与群组统计逻辑
+        return  # 单聊不参与后续的群统计逻辑
 
     # 情况 B：如果是非目标群组，跳过
     if not is_target_group:
         return
 
-    # 情况 C：目标群组的消息，执行归档和统计
-    
-    # [新增] 自动归档群消息到文档
-    # 尝试获取目标文档 Token，如果既没匹配标签也没配置默认文档，则返回 None
-    target_doc_token, matched_tag = get_target_doc_token(message)
-
-    if target_doc_token:
-        try:
-            print(f"  > [归档] 正在采集群消息到文档 {target_doc_token}...")
-            
-            # ... (中间代码保持不变，通过省略号或不需要改动) ... 
-            # 实际上由于 replace_file_content 需要连续块，我必须完整包含
-
-            # 获取发送者昵称
-            # sender.sender_id 可能有多种格式，需要正确提取
-            sender_id = None
-            if sender and sender.sender_id:
-                # 尝试获取 user_id 或 open_id
-                sender_id = getattr(sender.sender_id, 'user_id', None) or \
-                           getattr(sender.sender_id, 'open_id', None) or \
-                           getattr(sender.sender_id, 'union_id', None)
-            
-            if sender_id:
-                sender_nickname = get_cached_nickname(sender_id)
-            else:
-                sender_nickname = "未知用户"
-            
-            # 格式化发送时间
-            create_time = message.create_time
-            if create_time:
-                # create_time 是毫秒时间戳
-                send_time = datetime.fromtimestamp(int(create_time) / 1000).strftime("%Y-%m-%d %H:%M:%S")
-            else:
-                send_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            
-            # 判断是否是回复消息（有 parent_id 或 root_id 就是回复）
-            is_reply = bool(message.parent_id or message.root_id)
-            
-            # [路由] 获取目标归档文档 Token (已在上方获取)
-            print(f"  > [归档] 目标文档: {target_doc_token} (Tag: {matched_tag})")
-            
-            # 新增: 跳过无标签消息
-            if matched_tag == "默认":
-                print(f"  > [归档] 跳过无标签消息")
-            else:
-                # 获取被回复者的昵称（仅针对嵌套回复）
-                parent_sender_nickname = None
-                if is_reply and message.parent_id and message.root_id and message.parent_id != message.root_id:
-                    try:
-                        # 获取父消息详情
-                        parent_msg = collector.get_message_detail(message.parent_id)
-                        if parent_msg:
-                            # 提取父消息发送者ID
-                            parent_sender = parent_msg.get("sender", {})
-                            parent_sender_id_obj = parent_sender.get("sender_id", {})
-                            # API 返回的 sender_id 对象可能是字典
-                            parent_uid = parent_sender_id_obj.get("user_id") or \
-                                       parent_sender_id_obj.get("open_id") or \
-                                       parent_sender_id_obj.get("union_id")
-                            
-                            if parent_uid:
-                                parent_sender_nickname = get_cached_nickname(parent_uid)
-                    except Exception as e:
-                        print(f"  > [归档] 获取被回复者信息失败: {e}")
-
-                # 转换内容（带发送者和时间，以及是否是回复）
-                # 如果匹配到了具体标签（非"默认"），则通知 convert 移除该标签
-                tag_to_remove = matched_tag if matched_tag != "默认" else None
-                
-                blocks = docx_converter.convert(
-                    message.content, message.message_id, target_doc_token,
-                    sender_name=sender_nickname, send_time=send_time, 
-                    is_reply=is_reply, parent_sender_name=parent_sender_nickname,
-                    remove_tag=tag_to_remove
-                )
-                # 写入文档（回复消息需要插入在分割线之前）
-                docx_storage.add_blocks(target_doc_token, blocks, insert_before_divider=is_reply)
-                print(f"  > [归档] ✅ 群消息已同步 (标签: {matched_tag}, Doc: {target_doc_token[-6:]})")
-        except Exception as e:
-            print(f"  > [归档] ❌ 同步失败: {e}")
-            import traceback
-            traceback.print_exc()
-
+    # 情况 C：目标群组的消息，继续原有的统计逻辑
     content_str = message.content
     char_count = calculator._extract_text_length(content_str)
 
@@ -387,19 +176,6 @@ def do_p2_im_message_receive_v1(data: lark.im.v1.P2ImMessageReceiveV1) -> None:
     # 3. 获取发送者昵称
     user_name = get_cached_nickname(sender_id)
 
-    # [Bitable归档] 已禁用: 归档消息到 Bitable (双表格模式)
-    # try:
-    #     file_tokens_for_db, text_content_for_db = _process_message_attachments(message, message.message_id)
-    #     create_time_ms = int(message.create_time)
-    #     dt_object = datetime.fromtimestamp(create_time_ms / 1000)
-    #     month_str = dt_object.strftime("%Y-%m")
-    #     archive_fields = _build_archive_fields(...)
-    #     if hasattr(archive_storage, "save_message"):
-    #         archive_storage.save_message(archive_fields)
-    #     _update_topic_summary(...)
-    # except Exception as e:
-    #     print(f"  > [Bitable] ❌ 归档失败: {e}")
-
     # 4. 构建指标增量
     metrics_delta = {
         "message_count": 1,
@@ -409,55 +185,63 @@ def do_p2_im_message_receive_v1(data: lark.im.v1.P2ImMessageReceiveV1) -> None:
         "topic_initiated": 1 if not message.root_id else 0,
     }
 
-    # 5. 累积到批量更新字典 (替代原来的实时更新)
-    global message_counter
-    accumulate_metrics(sender_id, user_name, metrics_delta)
+    # 5. 更新多维表格
+    try:
+        print(f"实时更新: {user_name} (字数: {char_count})")
+        storage.update_or_create_record(sender_id, user_name, metrics_delta)
 
-    # 6. 特殊逻辑：处理被回复的情况
-    parent_id = message.parent_id
-    root_id = message.root_id
-    already_credited_ids = set()  # 记录本消息中已经获得"被回复"积分的人
+        # 6. 特殊逻辑：处理被回复的情况
+        parent_id = message.parent_id
+        root_id = message.root_id
+        already_credited_ids = set()  # 记录本消息中已经获得“被回复”积分的人
 
-    if parent_id:
-        # 识别目标用户 ID (target_parent_id)
-        target_parent_id = None
+        if parent_id:
+            # 识别目标用户 ID (target_parent_id)
+            target_parent_id = None
 
-        # 启发式逻辑：在话题群中，parent_id 和 root_id 通常相同且指向话题头
-        if parent_id == root_id and message.mentions:
-            target_parent_id = message.mentions[0].id.open_id
-            print(f"  > [探测] 识别到话题嵌套回复: 使用首个艾特对象 {target_parent_id}")
-        else:
-            # 普通群或直接回复话题，使用父消息发送者
-            target_parent_id = collector.get_message_sender(parent_id)
+            # 启发式逻辑：在话题群中，parent_id 和 root_id 通常相同且指向话题头
+            if parent_id == root_id and message.mentions:
+                target_parent_id = message.mentions[0].id.open_id
+                print(f"  > [探测] 识别到话题嵌套回复: 使用首个艾特对象 {target_parent_id}")
+            else:
+                # 普通群或直接回复话题，使用父消息发送者
+                target_parent_id = collector.get_message_sender(parent_id)
 
-        if target_parent_id:
-            # 获取被回复者昵称并累积
-            target_user_name = get_cached_nickname(target_parent_id)
-            print(f"  > [更新] 增加被回复数给: {target_user_name}")
-            accumulate_metrics(target_parent_id, target_user_name, {"reply_received": 1})
-            already_credited_ids.add(target_parent_id)
+            if target_parent_id:
+                # 获取被回复者昵称
+                target_user_name = get_cached_nickname(target_parent_id)
+                print(f"  > [更新] 增加被回复数给: {target_user_name}")
+                storage.update_or_create_record(
+                    target_parent_id, target_user_name, {"reply_received": 1}
+                )
+                already_credited_ids.add(target_parent_id)
 
-    # 7. 处理被 @ 的人
-    if message.mentions:
-        for mention in message.mentions:
-            mentioned_id = mention.id.open_id
-            if mentioned_id:
-                # 如果该用户刚才已经因为"被回复"加过分了，这次 @ 就跳过，避免重复计费
-                if mentioned_id in already_credited_ids:
-                    print(f"  > [跳过] {mentioned_id} 已在本次统计中作为被回复者，跳过艾特计费")
-                    continue
+        # 7. 处理被 @ 的人
+        if message.mentions:
+            for mention in message.mentions:
+                mentioned_id = mention.id.open_id
+                if mentioned_id:
+                    # 如果该用户刚才已经因为“被回复”加过分了，这次 @ 就跳过，避免重复计费
+                    if mentioned_id in already_credited_ids:
+                        print(f"  > [跳过] {mentioned_id} 已在本次统计中作为被回复者，跳过艾特计费")
+                        continue
 
-                mentioned_name = get_cached_nickname(mentioned_id)
-                print(f"  > [更新] 增加被艾特数给: {mentioned_name}")
-                accumulate_metrics(mentioned_id, mentioned_name, {"mention_received": 1})
+                    mentioned_name = get_cached_nickname(mentioned_id)
+                    print(f"  > [更新] 增加被艾特数给: {mentioned_name}")
+                    storage.update_or_create_record(
+                        mentioned_id, mentioned_name, {"mention_received": 1}
+                    )
 
-    # 8. 检查是否需要批量更新
-    message_counter += 1
-    if message_counter >= BATCH_UPDATE_THRESHOLD:
-        flush_pending_updates()
-        message_counter = 0
+        print("✅ 实时同步圆满成功")
 
-    print("✅ 消息处理完成")
+        # 8. 归档消息到新表
+        try:
+            archive_message_logic(message, sender_id, user_name)
+        except Exception as e:
+            print(f"  > [归档] ⚠️ 归档逻辑执行失败: {e}")
+
+    except Exception as e:
+        print(f"❌ 实时更新失败: {e}")
 
 
 def _process_message_attachments(message, message_id: str) -> list:
@@ -682,6 +466,37 @@ def _update_topic_summary(
         archive_storage.update_or_create_topic(root_id, summary_fields, is_new=False)
 
 
+def archive_message_logic(message, sender_id, user_name):
+    """
+    处理消息归档和话题汇总（重构版）
+
+    将消息保存到归档表，并更新话题汇总信息
+
+    Args:
+        message: 消息对象
+        sender_id: 发送者ID
+        user_name: 发送者姓名
+    """
+    now = datetime.now()
+    month_str = now.strftime("%Y-%m")
+    timestamp_ms = int(now.timestamp() * 1000)
+
+    # 1. 处理附件
+    file_tokens, text_content = _process_message_attachments(message, message.message_id)
+
+    # 2. 构建归档字段
+    archive_fields = _build_archive_fields(
+        message, sender_id, user_name, text_content, file_tokens, month_str, timestamp_ms
+    )
+
+    # 3. 保存到消息归档表
+    archive_storage.save_message(archive_fields)
+
+    # 4. 更新话题汇总
+    root_id = message.root_id or message.message_id
+    _update_topic_summary(
+        message, sender_id, user_name, text_content, root_id, month_str, timestamp_ms
+    )
 
 
 def do_p2_im_message_reaction_created_v1(data: lark.im.v1.P2ImMessageReactionCreatedV1) -> None:
@@ -750,17 +565,11 @@ def do_p2_im_message_reaction_created_v1(data: lark.im.v1.P2ImMessageReactionCre
         print(f"❌ 表情回复统计失败: {e}")
 
 
-def do_p2_im_chat_access_event_bot_p2p_chat_entered_v1(data) -> None:
-    """忽略机器人进入单聊事件，避免 WS 层报 processor not found。"""
-    return
-
-
 # 初始化事件处理器
 event_handler = (
     lark.EventDispatcherHandler.builder("", "")
     .register_p2_im_message_receive_v1(do_p2_im_message_receive_v1)
     .register_p2_im_message_reaction_created_v1(do_p2_im_message_reaction_created_v1)
-    .register_p2_im_chat_access_event_bot_p2p_chat_entered_v1(do_p2_im_chat_access_event_bot_p2p_chat_entered_v1)
     .build()
 )
 
@@ -773,7 +582,7 @@ def main():
     1. 环境变量验证
     2. 健康检查HTTP服务
     3. 自动重连机制
-    4. 每日 Pin 审计 + 月度归档调度
+    4. Pin监控（可选）
     """
     import time
     from env_validator import validate_environment
@@ -800,18 +609,19 @@ def main():
     max_retries = int(os.getenv("MAX_RETRIES", 10))  # 最大重试次数
     retry_delay = int(os.getenv("RETRY_DELAY", 30))  # 重试延迟（秒）
     
+    pin_monitor = None
+    
     while retry_count < max_retries:
         try:
-            # 不启用秒级 Pin 轮询，状态置为 false
-            health_monitor.set_pin_monitor_status(False)
-
-            # 启动 每日 Pin 审计 & 月度归档调度器 (后台线程,集成到主进程)
-            print("\n📅 启动 每日 Pin 审计 & 月度归档调度器...")
-            try:
-                start_pin_scheduler(auth)
-            except Exception as e:
-                print(f"⚠️  调度器启动失败: {e}")
-                print("⚠️  将继续运行,但 每日 Pin 审计和月度归档功能不可用")
+            # 初始化Pin监控（每次重连都重新初始化）
+            pin_table_id = os.getenv("PIN_TABLE_ID")
+            pin_interval = int(os.getenv("PIN_MONITOR_INTERVAL", 30))
+            
+            if pin_table_id and not pin_monitor:
+                print(f"🔍 Pin监控已启用 (轮询间隔: {pin_interval}秒)")
+                pin_monitor = PinMonitor(auth, storage, CHAT_ID, interval=pin_interval)
+                pin_monitor.start()
+                health_monitor.set_pin_monitor_status(True)
             
             # 初始化长连接客户端
             cli = lark.ws.Client(
@@ -872,12 +682,17 @@ def main():
             retry_delay = min(retry_delay * 2, 60)
         
         finally:
-            # 停止每日 Pin 审计 & 月度归档调度器
-            try:
-                print("🚦 正在停止 每日 Pin 审计调度器...")
-                stop_pin_scheduler()
-            except Exception as e:
-                print(f"⚠️  停止调度器时出错: {e}")
+            # 无论如何都确保Pin监控被停止
+            if pin_monitor:
+                try:
+                    # 只在最终退出时停止Pin监控
+                    if retry_count >= max_retries or KeyboardInterrupt:
+                        print("正在停止Pin监控...")
+                        pin_monitor.stop()
+                        pin_monitor = None
+                        health_monitor.set_pin_monitor_status(False)
+                except Exception as e:
+                    print(f"⚠️ 停止Pin监控时出错: {e}")
     
     # ========== 4. 清理和退出 ==========
     print("\n" + "=" * 60)

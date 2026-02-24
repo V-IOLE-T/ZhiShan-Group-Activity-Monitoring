@@ -218,6 +218,39 @@ UserService SHALL 通过多种方式优化性能。
 - **THEN** 优先淘汰不活跃用户的信息
 - **AND** 保留热点用户数据
 
+## Property-Based Testing Properties
+
+### [COMMUTATIVITY] Batch User Info Retrieval
+**Property**: Order of `user_ids` does not affect returned data
+- **FALSIFICATION STRATEGY**: Randomly shuffle user ID list:
+  - `get_batch_user_info([id1, id2, id3])` == `get_batch_user_info([id3, id1, id2])`
+  - All users present in result dict
+  - Cache misses minimized via single batch API call
+
+### [IDEMPOTENCY] Cache Refresh
+**Property**: Refreshing same user info updates cache atomically
+- **FALSIFICATION STRATEGY**: Concurrent refreshes for same user:
+  - Thread 1: starts refresh, gets old data
+  - Thread 2: starts refresh, gets new data
+  - Final cache state: consistent (no torn reads)
+  - Both threads complete without exception
+
+### [INVARIANT] Display Name Priority
+**Property**: `display_name` always follows priority: remark > nickname > user_id
+- **FALSIFICATION STRATEGY**: Users with varying attribute states:
+  - User with remark: returns remark
+  - User without remark but with nickname: returns nickname
+  - User with neither: returns user_id
+  - Never returns empty string or None
+
+### [BOUNDS] Cache Capacity Constraint
+**Property**: Cache never exceeds 500 entries
+- **FALSIFICATION STRATEGY**: Insert 501 unique users sequentially:
+  - First 500: all cached
+  - 501st user: evicts least-recently-used entry
+  - Cache size always ≤ 500
+  - Evicted users require API re-fetch
+
 ## REMOVED Requirements
 
 ### Requirement: 分散的用户名获取逻辑

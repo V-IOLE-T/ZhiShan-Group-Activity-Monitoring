@@ -255,6 +255,39 @@
 - **THEN** 重用 datetime 对象
 - **AND** 不频繁创建新对象
 
+## Property-Based Testing Properties
+
+### [ROUND-TRIP] Timestamp Format/Parse
+**Property**: `parse_time_string(format_timestamp_ms(ts)) == ts` (within seconds precision)
+- **FALSIFICATION STRATEGY**: Random timestamps across valid range (2000-2030):
+  - Format: "2024-03-01 12:00:00"
+  - Parse back to timestamp
+  - Difference ≤ 1 second (formatting loses sub-second precision)
+
+### [MONOTONICITY] Month Progression
+**Property**: `get_previous_month()` always returns earlier month
+- **FALSIFICATION STRATEGY**: Test across year boundaries:
+  - Current: 2024-01 → Previous: 2023-12
+  - Current: 2024-03 → Previous: 2024-02
+  - Never returns same or future month
+
+### [INVARIANT] Time Range Containment
+**Property**: `get_month_range("2024-03")` contains all timestamps in March 2024
+- **FALSIFICATION STRATEGY**: Generate timestamps:
+  - 2024-02-28 23:59:59: NOT in range
+  - 2024-03-01 00:00:00: in range (start)
+  - 2024-03-31 23:59:59: in range (end)
+  - 2024-04-01 00:00:00: NOT in range
+
+### [BOUNDS] Valid Timestamp Range
+**Property**: `is_valid_timestamp()` returns True only for 2000 ≤ year ≤ current_time + 1 day
+- **FALSIFICATION STRATEGY**: Edge cases:
+  - 1999-12-31: False (too early)
+  - 2000-01-01: True
+  - Current time: True
+  - Current time + 2 days: False (too far in future)
+  - None/negative: False
+
 ## REMOVED Requirements
 
 ### Requirement: 分散的时间处理代码

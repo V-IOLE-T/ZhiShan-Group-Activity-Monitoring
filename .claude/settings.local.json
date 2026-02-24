@@ -22,7 +22,8 @@
       "Bash(/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe:*)",
       "Bash(export PATH=\"/c/Users/ASUS/AppData/Roaming/npm:$PATH\")",
       "Bash(codex:*)",
-      "Bash(python -m pytest:*)"
+      "Bash(python -m pytest:*)",
+      "Skill(opsx:continue)"
     ]
   }
 }

@@ -2,6 +2,7 @@ import io
 import os
 import re
 import json
+import html
 from PIL import Image, ImageDraw, ImageFont, UnidentifiedImageError
 from pilmoji import Pilmoji
 
@@ -137,7 +138,14 @@ class CardStyleImageGenerator:
         except: pass
 
     def _clean_markdown(self, text):
-        return re.sub(r'[*#]', '', text)
+        cleaned = html.unescape(str(text or "")).replace("\\n", "\n")
+        cleaned = re.sub(r"<mention-doc[^>]*>(.*?)</mention-doc>", r"\1", cleaned, flags=re.IGNORECASE | re.DOTALL)
+        cleaned = re.sub(r"</?text[^>]*>", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"</?mention-user[^>]*>", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", cleaned)
+        cleaned = re.sub(r"[`*>#]", "", cleaned)
+        cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+        return cleaned.strip()
 
     def _wrap_text(self, text, max_chars):
         lines = []

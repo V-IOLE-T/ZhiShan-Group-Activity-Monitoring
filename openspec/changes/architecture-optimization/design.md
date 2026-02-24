@@ -22,7 +22,7 @@
 |---------|---------|---------|
 | **代码重复** | 文件上传逻辑重复 3 次、用户名获取重复 4 次、Pin 处理重复 3 次 | 维护成本高，Bug 修复需多处同步 |
 | **功能重叠** | PinMonitor（30秒轮询）与 DailyPinAuditor（每日09:00）功能重叠 | 可能重复处理，数据一致性风险 |
-| **同步阻塞** | 单聊回复在主事件循环同步执行，MCP 调用（20s）+ 图片生成可能导致长连接心跳超时 | 消息堆积，服务不稳定 |
+| **同步阻塞** | 单聊回复在主事件循环同步执行，MCP 调用可能导致较长等待时间 | 用户体验受影响 |
 | **线程安全** | `long_connection_listener.py` 使用非线程安全 LRU 缓存，`pending_updates` 未加锁 | 多线程环境下可能数据竞争 |
 
 ### 约束条件
@@ -36,7 +36,7 @@
 
 **业务约束**（用户需求）：
 - Pin 功能：仅保留每日审计（09:00），移除实时轮询
-- 单聊处理：两阶段模式（同步响应 + 异步补充）
+- 单聊处理：保持同步模式，MCP 超时 30 秒，添加重试机制
 - 重构策略：逐步重构，优先高风险部分
 
 **技术约束**：
@@ -61,7 +61,7 @@
 
 1. **消除代码重复**：将重复的文件上传、用户名获取、Pin 处理逻辑统一到服务层
 2. **移除功能重叠**：禁用 PinMonitor，统一使用 DailyPinAuditor
-3. **优化单聊响应**：实现两阶段处理，5秒内返回基础响应
+3. **优化单聊处理**：保持同步模式，增加 MCP 超时到 30 秒并添加重试机制
 4. **提升线程安全**：替换非线程安全组件，保护共享状态
 5. **保持功能稳定**：所有现有功能无回归，用户无感知切换
 
@@ -102,42 +102,39 @@
 - ❌ **领域驱动设计**：引入复杂概念，团队学习成本高
 - ❌ **微服务拆分**：单机部署场景，微服务反而增加复杂度
 
-### 决策 2: 两阶段单聊处理
+### 决策 2: 同步单聊处理
 
-**选择**：将单聊回复拆分为"同步响应 + 异步补充"两阶段。
+**选择**：保持同步处理模式，直接生成图片并回复用户。
 
 **实现方案**：
 ```python
-# 阶段 1: 同步返回基础响应（< 5秒）
+# 同步处理流程
 def handle_private_message(message):
     if is_document_link(message):
-        text = extract_text_reply()      # 1秒
-        placeholder = generate_placeholder()  # 0.5秒
-        send_reply(text, placeholder)    # 1秒
-    # 总耗时 ~2.5秒，不阻塞长连接
-
-    # 阶段 2: 异步生成完整图片
-    threading.Thread(
-        target=async_generate_and_push,
-        args=(message,),
-        daemon=True
-    ).start()
+        content = mcp_client.fetch_doc(token)    # 获取内容（30秒超时，带重试）
+        image = generator.generate_card(content)  # 生成图片
+        send_reply(image)                         # 发送图片
 ```
 
 **理由**：
-- **用户体验优化**：用户立即收到"处理中"反馈，避免焦虑等待
-- **长连接保护**：主事件循环不被阻塞，心跳正常
-- **实现简单**：使用后台线程，无需引入异步框架
-- **容错性**：图片生成失败不影响基础响应已送达
+- **简单直接**：用户发送消息后直接收到图片，体验更好
+- **无需占位图**：不需要"生成中"的中间状态
+- **代码简洁**：无需后台线程、线程池管理
+- **淡绿色样式保持**：继续使用 `HEADER_BG_COLOR = (220, 235, 232)`
+
+**超时和重试配置**：
+- MCP 调用超时：30 秒（从 10 秒增加）
+- 失败重试：最多 2 次，每次间隔 2 秒
+- 降级策略：超时或失败后返回纯文本卡片
 
 **替代方案未选择**：
-- ❌ **完全异步化**：需要引入 asyncio，重构成本高，与现有同步代码不兼容
-- ❌ **增加超时时间**：治标不治本，长连接仍可能超时
+- ❌ **两阶段异步处理**：用户体验复杂，需要占位图和后台线程
+- ❌ **完全异步化**：需要引入 asyncio，重构成本高
 - ❌ **消息队列**：单机部署不需要 MQ 的复杂度
 
 ### 决策 3: 逐步重构策略
 
-**选择**：按优先级分 4 个阶段实施，每个阶段独立可验证。
+**选择**：按优先级分 3 个阶段实施，每个阶段独立可验证。
 
 **阶段划分**：
 
@@ -145,8 +142,7 @@ def handle_private_message(message):
 |------|------|---------|------|
 | **阶段 1** | 文件上传服务 | 所有调用点功能无回归 | 🟢 低 |
 | **阶段 2** | Pin 服务统一 | 移除 pin_monitor.py，每日审计正常 | 🟡 中 |
-| **阶段 3** | 单聊异步化 | 响应时间 < 5秒，长连接稳定 | 🟡 中 |
-| **阶段 4** | 其他优化 | 测试覆盖率提升，线程安全 | 🟢 低 |
+| **阶段 3** | 其他优化 | 测试覆盖率提升，线程安全 | 🟢 低 |
 
 **理由**：
 - **风险可控**：每阶段独立验证，失败时回滚范围小
@@ -297,27 +293,13 @@ FileUploadService.upload_to_drive(data, token)
 
 **回滚**：恢复 PinMonitor，环境变量控制启用旧逻辑
 
-### 阶段 3: 单聊异步化（2-3天）
-
-**步骤**：
-1. 修改 `reply_card/processor.py`：
-   - 拆分 `process_and_reply()` 为两阶段
-   - 添加 `generate_placeholder()` 方法
-   - 后台线程调用完整图片生成
-2. 修改 `reply_card/mcp_client.py`：
-   - 缩短超时时间到 10 秒
-   - 添加重试和降级逻辑
-3. 创建占位图模板
-4. 编写单元测试
-5. 验证：单聊机器人，测量响应时间
-
-**回滚**：环境变量控制使用同步模式
-
-### 阶段 4: 其他优化（1-2天）
+### 阶段 3: 其他优化（1-2天）
 
 **步骤**：
 1. 创建 `services/user_service.py`
-2. 创建 `services/async_card_service.py`（封装两阶段逻辑）
+2. 优化 `reply_card/mcp_client.py`：
+   - 增加超时到 30 秒
+   - 添加重试机制（最多 2 次，间隔 2 秒）
 3. 添加时间工具函数到 `utils.py`
 4. 替换 LRU 缓存为 ThreadSafeLRUCache
 5. 为 `pending_updates` 添加锁保护
@@ -330,7 +312,7 @@ FileUploadService.upload_to_drive(data, token)
 
 - [ ] 所有单元测试通过
 - [ ] 手动测试：群消息归档正常
-- [ ] 手动测试：单聊响应 < 5秒
+- [ ] 手动测试：单聊图片生成正常
 - [ ] 手动测试：Pin 每日审计触发
 - [ ] 日志无异常错误
 - [ ] 性能指标：CPU/内存无明显增长
@@ -363,7 +345,7 @@ docker-compose down && docker-compose up -d
 | 问题 | 答案 | 来源 |
 |------|------|------|
 | Pin 实时轮询是否保留？ | 否，仅保留每日审计 | 用户确认 |
-| 单聊处理是否异步化？ | 是，采用两阶段模式 | 用户确认 |
+| 单聊处理模式？ | 保持同步模式，增加超时和重试 | 用户确认 |
 | 代码重构策略？ | 逐步重构，优先高风险 | 用户确认 |
 
 ### 待解决的问题
@@ -388,8 +370,7 @@ services/
 ├── __init__.py
 ├── file_upload_service.py    # 文件上传服务
 ├── pin_service.py            # Pin 处理服务
-├── user_service.py           # 用户信息获取服务
-└── async_card_service.py     # 异步卡片回复服务
+└── user_service.py           # 用户信息获取服务
 ```
 
 ### 修改文件清单
@@ -398,8 +379,8 @@ services/
 long_connection_listener.py  # 替换 LRU 缓存
 pin_daily_audit.py           # 使用 PinService
 monthly_archiver.py          # 使用 PinService
-reply_card/processor.py      # 两阶段处理
-reply_card/mcp_client.py     # 超时和重试
+reply_card/processor.py      # 简化为同步处理
+reply_card/mcp_client.py     # 增加超时到 30 秒，添加重试
 utils.py                     # 添加时间工具
 config.py                    # 添加 API 常量
 pin_scheduler.py             # 禁用 PinMonitor
@@ -409,8 +390,9 @@ storage.py                   # 清理重复代码
 ### 删除文件清单
 
 ```
-pin_monitor.py       # Pin 实时监控（功能合并到 pin_daily_audit.py）
-pin_weekly_report.py # Pin 周报生成器（不需要周报功能）
+pin_monitor.py              # Pin 实时监控（功能合并到 pin_daily_audit.py）
+pin_weekly_report.py        # Pin 周报生成器（不需要周报功能）
+reply_card/placeholder_generator.py  # 占位图生成器（不再需要）
 ```
 
 ### 测试策略

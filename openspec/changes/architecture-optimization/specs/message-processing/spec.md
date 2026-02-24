@@ -5,93 +5,78 @@
 ### Requirement: 单聊消息处理
 系统 SHALL 处理用户与机器人的单聊消息，支持文档链接提取和卡片生成。
 
-**变更说明**：从同步阻塞处理改为两阶段处理（同步响应 + 异步补充），确保不阻塞长连接事件循环。
+**变更说明**：保持同步处理模式，直接生成图片并回复用户，MCP 超时增加到 30 秒并添加重试机制。
 
-#### Scenario: 收到文档链接 - 两阶段处理
+#### Scenario: 收到文档链接 - 同步处理
 - **WHEN** 用户在单聊中发送飞书文档链接（docx/doc/wiki）
-- **THEN** **同步阶段**：
-  - 提取文档 Token
-  - 生成占位图（带"生成中"提示）
-  - 发送文字说明："正在生成卡片，请稍候..."
-  - 总耗时 < 5 秒
-- **AND** **异步阶段**：
-  - 后台线程调用 MCP 获取文档内容
-  - 生成完整卡片图片
-  - 上传图片并发送给用户
-  - 图片生成完成后主动推送
+- **THEN** 提取文档 Token
+- **AND** 调用 MCP 获取文档内容（30秒超时，带重试）
+- **AND** 使用淡绿色样式生成卡片图片
+- **AND** 直接发送图片回复给用户
+- **AND** 总耗时视 MCP 调用而定（通常 10-30 秒）
 
 #### Scenario: 收到纯文本消息
 - **WHEN** 用户在单聊中发送纯文本（非文档链接）
-- **THEN** 同步返回文字图片
+- **THEN** 直接渲染为图片
+- **AND** 发送图片回复
 - **AND** 总耗时 < 3 秒
-- **AND** 不需要异步补充
 
 #### Scenario: MCP 调用超时 - 降级处理
-- **WHEN** MCP 调用超过 10 秒未返回
+- **WHEN** MCP 调用超过 30 秒未返回
 - **THEN** 停止等待，返回降级响应
 - **AND** 降级响应为纯文本卡片（包含文档标题和链接）
 - **AND** 日志输出 "[单聊] ⚠️ MCP 调用超时，使用降级方案"
 
-#### Scenario: 图片生成失败
-- **WHEN** 异步阶段图片生成失败
-- **THEN** 发送文字说明："抱歉，图片生成失败，请稍后重试"
-- **AND** 不影响已发送的同步响应
-- **AND** 日志输出 "[单聊] ❌ 图片生成失败: {原因}"
+#### Scenario: MCP 调用失败 - 重试机制
+- **WHEN** MCP 调用因网络错误失败
+- **THEN** 自动重试 1 次（间隔 2 秒）
+- **AND** 重试成功后正常生成图片
+- **AND** 重试失败则降级为纯文本卡片
 
 #### Scenario: 文档无权限
 - **WHEN** 机器人无目标文档的阅读权限
 - **THEN** 同步返回错误提示
 - **AND** 提示内容："❌ 获取文档内容失败，请检查机器人是否拥有该文档的阅读权限。"
-- **AND** 不启动异步生成
 
 #### Scenario: 非文档链接
 - **WHEN** 用户发送非飞书文档链接（如网页链接）
 - **THEN** 返回提示："请发送飞书文档链接（docx/doc/wiki）"
 - **AND** 不执行任何处理
 
-### Requirement: 长连接事件循环保护
-系统 SHALL 确保单聊处理不阻塞长连接事件循环。
+## Property-Based Testing Properties
 
-#### Scenario: 单聊处理时间限制
-- **WHEN** 执行单聊消息处理
-- **THEN** 同步阶段必须在 5 秒内完成
-- **AND** 超过 5 秒的后续操作移至后台线程
+### [INVARIANT] Degradation Fallback
+**Property**: MCP failure always produces valid response (never crashes)
+- **FALSIFICATION STRATEGY**: Inject various MCP failures:
+  - Timeout (> 30s): return plain text card
+  - Network error: retry once, then degrade
+  - 503 error: return text with error message
+  - Always return valid response to user
 
-#### Scenario: 心跳正常
-- **WHEN** 单聊处理期间
-- **THEN** 长连接心跳正常发送
-- **AND** 不会因单聊处理导致连接超时
-
-#### Scenario: 消息队列不堆积
-- **WHEN** 单聊处理在后台线程运行
-- **THEN** 主事件循环继续处理新消息
-- **AND** 群聊消息正常处理，不延迟
-
-### Requirement: 后台线程管理
-系统 SHALL 合理管理单聊处理的后台线程。
-
-#### Scenario: Daemon 线程
-- **WHEN** 创建后台图片生成线程
-- **THEN** 设置 daemon=True
-- **AND** 主程序退出时自动清理
-
-#### Scenario: 线程并发限制
-- **WHEN** 同时有多个单聊请求
-- **THEN** 限制最多 5 个并发线程
-- **AND** 超过限制时排队等待
-
-#### Scenario: 线程异常隔离
-- **WHEN** 后台线程抛出异常
-- **THEN** 异常被捕获并记录
-- **AND** 不影响主线程和其他线程
+### [IDEMPOTENCY] Message Deduplication
+**Property**: Processing same `event_id` twice yields single response
+- **FALSIFICATION STRATEGY**: Duplicate events from webhook:
+  - First event: processed, response sent
+  - Second event (same `event_id`): skipped, no response
+  - Cache contains exactly one entry per `event_id`
 
 ## REMOVED Requirements
 
-### Requirement: 同步阻塞式单聊处理
-**Reason**: MCP 调用（20秒超时）+ 图片生成可能超过 30 秒，导致长连接心跳超时和消息堆积
+### Requirement: 两阶段异步处理
+**Reason**: 用户选择保持同步处理模式，直接生成图片并回复，不需要占位图和后台线程
+
 **Migration**:
-- 旧实现：`process_and_reply()` 同步执行完整流程
-- 新实现：拆分为 `sync_reply()` + `async_generate_and_push()`
-- MCP 超时从 20 秒缩短为 10 秒
-- 添加占位图生成逻辑
-- 添加后台线程管理
+- 删除 `reply_card/placeholder_generator.py` 文件
+- 简化 `reply_card/processor.py` 的 `process_and_reply()` 方法
+- 删除 `_MAX_ASYNC_THREADS` 和 `_thread_pool` 线程池
+- MCP 超时从 10 秒增加到 30 秒
+- 添加重试机制（最多 2 次，间隔 2 秒）
+
+### Requirement: 长连接事件循环保护
+**Reason**: 同步处理模式下，不再需要特别保护长连接事件循环
+
+### Requirement: 后台线程管理
+**Reason**: 同步处理模式下，不再需要后台线程管理
+
+### Requirement: 占位图设计
+**Reason**: 同步处理模式下，不再需要占位图

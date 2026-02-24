@@ -207,6 +207,36 @@ PinService SHALL 在每天 09:00 自动触发昨日 Pin 审计。
 - **AND** 发送汇总卡片到群聊
 - **AND** 卡片包含：日期、数量、每条 Pin 摘要
 
+## Property-Based Testing Properties
+
+### [COMMUTATIVITY] Batch Pin Retrieval
+**Property**: Order of fetching Pin message details does not affect final result
+- **FALSIFICATION STRATEGY**: Randomly permute list of `message_id`s:
+  - `get_batch_message_detail([id1, id2, id3])` == `get_batch_message_detail([id3, id1, id2])`
+  - All messages retrieved regardless of order
+  - Total API calls minimized (batching)
+
+### [IDEMPOTENCY] Pin Processing Deduplication
+**Property**: Re-running daily audit for same date produces no duplicate records
+- **FALSIFICATION STRATEGY**: Run audit twice for same date:
+  - First run: creates N new Bitable records
+  - Second run: creates 0 new records (all marked "已处理")
+  - `.processed_daily_pins.txt` contains unique message IDs
+
+### [INVARIANT] Activity Score Monotonic Increase
+**Property**: User's "被加精次数" and "活跃度分数" only increase or stay same
+- **FALSIFICATION STRATEGY**: Process random Pin events for same user:
+  - Score after N pins ≥ score after N-1 pins
+  - Never decreases or becomes negative
+  - Re-processing same Pin does not increment score again
+
+### [BOUNDS] Attachment Size Limit
+**Property**: Attachments > 10MB are skipped without crashing
+- **FALSIFICATION STRATEGY**: Upload files with sizes: 0KB, 1MB, 9MB, 10MB, 11MB, 100MB:
+  - Files ≤ 10MB: uploaded successfully
+  - Files > 10MB: skipped with log "[Pin] ⚠️ 附件过大，跳过转存"
+  - No exceptions raised
+
 ## REMOVED Requirements
 
 ### Requirement: PinMonitor 实时轮询
