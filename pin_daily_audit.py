@@ -60,18 +60,31 @@ class DailyPinAuditor:
         yesterday_end_ms = int(yesterday_end.timestamp() * 1000)
 
         candidates = []
+        skipped_processed = 0
+        skipped_outside_window = 0
+        skipped_invalid_time = 0
         for pin in pins:
             message_id = pin.get("message_id")
-            pin_time_ms = self._safe_int(pin.get("create_time"))
+            pin_time_raw = pin.get("create_time") or pin.get("pin_time") or pin.get("time")
+            pin_time_ms = self._normalize_timestamp_ms(self._safe_int(pin_time_raw))
             if not message_id:
                 continue
             if message_id in self.processed_ids:
+                skipped_processed += 1
+                continue
+            if pin_time_ms <= 0:
+                skipped_invalid_time += 1
                 continue
             if yesterday_start_ms <= pin_time_ms < yesterday_end_ms:
                 candidates.append(pin)
+            else:
+                skipped_outside_window += 1
 
         if not candidates:
-            print("📌 昨日无新增 Pin（或均已处理），不发送提醒")
+            print(
+                "📌 昨日无新增 Pin（或均已处理），不发送提醒"
+                f" | 已处理: {skipped_processed}, 非昨日窗口: {skipped_outside_window}, 无效时间: {skipped_invalid_time}"
+            )
             return 0
 
         print(f"📌 昨日新增 Pin 待处理: {len(candidates)} 条")
@@ -105,7 +118,8 @@ class DailyPinAuditor:
             return None
 
         operator_id = self._extract_user_id(pin.get("operator_id"))
-        pin_time_ms = self._safe_int(pin.get("create_time"))
+        pin_time_raw = pin.get("create_time") or pin.get("pin_time") or pin.get("time")
+        pin_time_ms = self._normalize_timestamp_ms(self._safe_int(pin_time_raw))
         pin_time_str = self._format_ms(pin_time_ms)
 
         detail = self._get_message_detail(message_id)
@@ -240,16 +254,29 @@ class DailyPinAuditor:
 
     def _get_pinned_messages(self) -> Optional[List[dict]]:
         url = "https://open.feishu.cn/open-apis/im/v1/pins"
-        params = {"chat_id": self.chat_id}
+        page_token = None
+        all_items: List[dict] = []
+
         try:
-            resp = requests.get(url, headers=self.auth.get_headers(), params=params, timeout=10)
-            data = resp.json()
-            if data.get("code") == 0:
-                items = data.get("data", {}).get("items", [])
-                print(f"📌 当前 Pin 总数: {len(items)}")
-                return items
-            print(f"❌ 获取 Pin 列表失败: {data.get('msg')}")
-            return None
+            while True:
+                params = {"chat_id": self.chat_id, "page_size": 100}
+                if page_token:
+                    params["page_token"] = page_token
+
+                resp = requests.get(url, headers=self.auth.get_headers(), params=params, timeout=10)
+                data = resp.json()
+                if data.get("code") != 0:
+                    print(f"❌ 获取 Pin 列表失败: {data.get('msg')}")
+                    return None
+
+                page_items = data.get("data", {}).get("items", [])
+                all_items.extend(page_items)
+                page_token = data.get("data", {}).get("page_token")
+                if not page_token:
+                    break
+
+            print(f"📌 当前 Pin 总数: {len(all_items)}")
+            return all_items
         except Exception as e:
             print(f"❌ 获取 Pin 列表异常: {e}")
             return None
@@ -393,7 +420,16 @@ class DailyPinAuditor:
             return 0
 
     @staticmethod
+    def _normalize_timestamp_ms(ts: int) -> int:
+        """将时间戳统一为毫秒（兼容秒级时间戳）"""
+        if ts <= 0:
+            return 0
+        # 10^11 约为 1973 年的毫秒时间戳，低于该值可视为秒级时间戳
+        return ts * 1000 if ts < 100_000_000_000 else ts
+
+    @staticmethod
     def _format_ms(ts_ms: int) -> str:
+        ts_ms = DailyPinAuditor._normalize_timestamp_ms(ts_ms)
         if ts_ms <= 0:
             return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         return datetime.fromtimestamp(ts_ms / 1000).strftime("%Y-%m-%d %H:%M:%S")
