@@ -13,8 +13,8 @@
 | `calculator.py` | 活跃度指标计算与消息文本解析。 |
 | `storage.py` | 多维表格/文档写入层（活跃度、Pin归档、文档块写入）。 |
 | `message_renderer.py` | 飞书消息内容转 Docx Block。 |
-| `pin_daily_audit.py` | 每日 Pin 审计（每天 09:00 处理昨日新增 Pin）。 |
-| `pin_scheduler.py` | 调度器（每日 Pin 审计 + 月度归档）。 |
+| `pin_daily_audit.py` | 每周 Pin 审计（每周一 09:00 处理上周新增 Pin）。 |
+| `pin_scheduler.py` | 调度器（每周 Pin 审计 + 月度归档）。 |
 | `monthly_archiver.py` | 月度归档任务（每月 1 号）。 |
 | `pin_monitor.py` | 旧秒级 Pin 轮询实现（当前主流程已下线）。 |
 | `pin_weekly_report.py` | Pin 周报脚本（兼容/辅助）。 |
@@ -33,7 +33,7 @@
 | `docs/PROGRAM.md` | 当前功能全景与稳定性说明。 |
 | `docs/USER_MANUAL.md` | 用户手册（星友视角）。 |
 | `docs/ADMIN_MANUAL.md` | 管理者手册（运营动作）。 |
-| `docs/PIN_FEATURE_GUIDE.md` | Pin 能力说明（当前为每日审计机制）。 |
+| `docs/PIN_FEATURE_GUIDE.md` | Pin 能力说明（当前为每周审计机制）。 |
 | `docs/DEPLOYMENT_GUIDE.md` | 部署指南。 |
 | `docs/DEVELOPMENT.md` | 开发指南。 |
 | `docs/VISUALIZATION_GUIDE.md` | 可视化方案与说明。 |
@@ -87,7 +87,7 @@
 | `github/` | 协作流程与编排文档（非业务运行核心）。 |
 | `.claude/` | 本地 AI 命令与技能配置（非业务运行核心）。 |
 | `openspec/` | 规范目录骨架。 |
-| `.processed_daily_pins.txt` | 每日 Pin 审计去重记录。 |
+| `.processed_daily_pins.txt` | Pin 审计去重记录。 |
 | `README.md` | 项目根说明文档。 |
 | `REORGANIZATION_GUIDE.md` | 重构说明。 |
 | `.gitignore` / `.dockerignore` | 忽略规则。 |

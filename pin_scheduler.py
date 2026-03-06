@@ -1,5 +1,5 @@
 """
-每日 Pin 审计 & 月度归档后台调度器
+每周 Pin 审计 & 月度归档后台调度器
 集成到主进程中，使用 schedule 库定时执行
 """
 import threading
@@ -12,7 +12,7 @@ from pin_daily_audit import DailyPinAuditor
 
 
 class PinReportScheduler:
-    """每日 Pin 审计 & 月度归档后台调度器"""
+    """每周 Pin 审计 & 月度归档后台调度器"""
     
     def __init__(self, auth=None):
         self.running = False
@@ -38,7 +38,7 @@ class PinReportScheduler:
                     auth, storage, chat_id, docx_storage=docx_storage, essence_doc_token=essence_doc_token
                 )
             except Exception as e:
-                print(f"⚠️  每日 Pin 审计器初始化失败: {e}")
+                print(f"⚠️  每周 Pin 审计器初始化失败: {e}")
     
     def start(self):
         """启动后台调度线程"""
@@ -49,12 +49,12 @@ class PinReportScheduler:
         self.running = True
         
         # 配置定时任务
-        # 1. 每日 09:00：处理昨日新增 Pin（按 Pin 操作时间）
+        # 1. 每周一 09:00：处理上周新增 Pin（按 Pin 操作时间）
         if self.pin_auditor:
-            schedule.every().day.at("09:00").do(self._run_daily_pin_job)
-            print("✅ 每日 Pin 审计调度已启动 (每天 09:00)")
+            schedule.every().monday.at("09:00").do(self._run_weekly_pin_job)
+            print("✅ 每周 Pin 审计调度已启动 (每周一 09:00)")
         else:
-            print("⚠️  每日 Pin 审计器不可用，跳过该调度任务")
+            print("⚠️  每周 Pin 审计器不可用，跳过该调度任务")
         
         # 2. 月度归档: 每天凌晨 2:00 检查 (仅在 1 号执行)
         if self.archiver and self.archiver.archive_table_id:
@@ -80,24 +80,28 @@ class PinReportScheduler:
             schedule.run_pending()
             time.sleep(60)  # 每分钟检查一次
     
-    def _run_daily_pin_job(self):
-        """执行每日 Pin 审计任务"""
+    def _run_weekly_pin_job(self):
+        """执行每周 Pin 审计任务"""
         try:
             print(f"\n{'='*60}")
-            print(f"🔔 定时任务触发: 每日 Pin 审计")
+            print(f"🔔 定时任务触发: 每周 Pin 审计")
             print(f"   执行时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
             print(f"{'='*60}\n")
             
-            count = self.pin_auditor.run_for_yesterday() if self.pin_auditor else 0
+            count = self.pin_auditor.run_for_last_week() if self.pin_auditor else 0
             
             print(f"\n{'='*60}")
-            print(f"✅ 每日 Pin 审计执行完成: {count} 条")
+            print(f"✅ 每周 Pin 审计执行完成: {count} 条")
             print(f"   下次执行: {self._get_next_run_time()}")
             print(f"{'='*60}\n")
         except Exception as e:
-            print(f"❌ 每日 Pin 审计执行失败: {e}")
+            print(f"❌ 每周 Pin 审计执行失败: {e}")
             import traceback
             traceback.print_exc()
+
+    def _run_daily_pin_job(self):
+        """兼容旧方法名：执行每周 Pin 审计任务"""
+        self._run_weekly_pin_job()
     
     def _run_archive_job(self):
         """执行月度归档任务 (仅在每月 1 号)"""
@@ -134,9 +138,9 @@ class PinReportScheduler:
         return "未安排"
     
     def run_now(self):
-        """立即执行一次每日 Pin 审计 (测试用)"""
-        print("\n🧪 手动触发每日 Pin 审计...")
-        self._run_daily_pin_job()
+        """立即执行一次每周 Pin 审计 (测试用)"""
+        print("\n🧪 手动触发每周 Pin 审计...")
+        self._run_weekly_pin_job()
     
     def run_archive_now(self):
         """立即执行一次月度归档 (测试用)"""
@@ -160,7 +164,7 @@ def get_scheduler(auth=None):
 
 
 def start_pin_scheduler(auth=None):
-    """启动每日 Pin 审计 & 月度归档调度器"""
+    """启动每周 Pin 审计 & 月度归档调度器"""
     scheduler = get_scheduler(auth)
     scheduler.start()
 
@@ -172,7 +176,7 @@ def stop_pin_scheduler():
 
 
 def run_pin_audit_now():
-    """立即执行每日 Pin 审计 (测试用)"""
+    """立即执行每周 Pin 审计 (测试用)"""
     scheduler = get_scheduler()
     scheduler.run_now()
 
@@ -184,5 +188,5 @@ def run_archive_now():
 
 
 def run_pin_report_now():
-    """兼容旧方法名：立即执行每日 Pin 审计 (测试用)"""
+    """兼容旧方法名：立即执行每周 Pin 审计 (测试用)"""
     run_pin_audit_now()

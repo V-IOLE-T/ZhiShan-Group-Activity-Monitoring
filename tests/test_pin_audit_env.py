@@ -1,7 +1,9 @@
 import datetime as dt
 import sys
+import tempfile
 import types
 import unittest
+import uuid
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -65,7 +67,7 @@ class TestPinAuditEnvironment(unittest.TestCase):
         self.storage = FakeStorage()
         self.docx_storage = FakeDocxStorage()
 
-        test_processed_file = Path(__file__).parent / ".tmp_processed_daily_pins.txt"
+        test_processed_file = Path(tempfile.gettempdir()) / f".tmp_processed_daily_pins_{uuid.uuid4().hex}.txt"
         if test_processed_file.exists():
             test_processed_file.unlink()
 
@@ -82,18 +84,18 @@ class TestPinAuditEnvironment(unittest.TestCase):
         if DailyPinAuditor.PROCESSED_FILE.exists():
             DailyPinAuditor.PROCESSED_FILE.unlink()
 
-    def test_daily_pin_audit_success_flow_with_stubbed_feishu_api(self):
+    def test_weekly_pin_audit_success_flow_with_stubbed_feishu_api(self):
         """
         测试环境目标：
-        1. 用假 API 跑通昨日 Pin 处理完整链路
+        1. 用假 API 跑通上周 Pin 处理完整链路
         2. 验证拉取 Pin 的 page_size 为 50
         3. 验证归档/计数/精华文档/汇总卡片都被触发
         """
-        now_day = dt.date(2026, 2, 25)
-        yesterday_start = dt.datetime.combine(now_day - dt.timedelta(days=1), dt.time.min)
-        yesterday_end = yesterday_start + dt.timedelta(days=1)
+        this_week_start = dt.datetime(2026, 2, 23, 0, 0, 0)
+        last_week_start = this_week_start - dt.timedelta(days=7)
+        last_week_end = this_week_start
 
-        yesterday_pin_ms = int(dt.datetime(2026, 2, 24, 10, 30, 0).timestamp() * 1000)
+        last_week_pin_ms = int(dt.datetime(2026, 2, 20, 10, 30, 0).timestamp() * 1000)
         old_pin_ms = int(dt.datetime(2026, 2, 23, 9, 0, 0).timestamp() * 1000)
 
         all_get_calls = []
@@ -107,7 +109,7 @@ class TestPinAuditEnvironment(unittest.TestCase):
                     "code": 0,
                     "data": {
                         "items": [
-                            {"message_id": "msg_yesterday", "operator_id": "ou_admin", "create_time": str(yesterday_pin_ms)},
+                            {"message_id": "msg_last_week", "operator_id": "ou_admin", "create_time": str(last_week_pin_ms)},
                             {"message_id": "msg_old", "operator_id": "ou_admin", "create_time": str(old_pin_ms)},
                         ],
                         "page_token": None,
@@ -125,7 +127,7 @@ class TestPinAuditEnvironment(unittest.TestCase):
                                 "sender": {"id": {"open_id": "ou_sender_1"}},
                                 "msg_type": "text",
                                 "body": {"content": '{"text":"hello pin"}'},
-                                "create_time": str(yesterday_pin_ms),
+                                "create_time": str(last_week_pin_ms),
                             }
                         ]
                     },
@@ -140,24 +142,24 @@ class TestPinAuditEnvironment(unittest.TestCase):
         with (
             patch("pin_daily_audit.requests.get", side_effect=fake_get),
             patch("pin_daily_audit.requests.post", return_value=fake_post_response) as mock_post,
-            patch.object(DailyPinAuditor, "_get_yesterday_window", return_value=(yesterday_start, yesterday_end)),
+            patch.object(DailyPinAuditor, "_get_last_week_window", return_value=(last_week_start, last_week_end)),
             patch.object(self.auditor.collector, "get_user_names", return_value={"ou_sender_1": "Alice", "ou_admin": "Admin"}),
         ):
-            processed_count = self.auditor.run_for_yesterday()
+            processed_count = self.auditor.run_for_last_week()
 
         self.assertEqual(processed_count, 1)
         self.assertEqual(len(self.storage.archived_pin_messages), 1)
         self.assertEqual(len(self.storage.pin_count_updates), 1)
         self.assertEqual(len(self.docx_storage.blocks_calls), 1)
         self.assertEqual(mock_post.call_count, 1)
-        self.assertIn("msg_yesterday", self.auditor.processed_ids)
+        self.assertIn("msg_last_week", self.auditor.processed_ids)
         self.assertNotIn("msg_old", self.auditor.processed_ids)
 
         first_get = all_get_calls[0]
         self.assertTrue(first_get["url"].endswith("/im/v1/pins"))
         self.assertEqual(first_get["params"]["page_size"], DailyPinAuditor.MAX_PIN_PAGE_SIZE)
 
-    def test_daily_pin_audit_should_stop_when_pin_list_api_returns_error(self):
+    def test_weekly_pin_audit_should_stop_when_pin_list_api_returns_error(self):
         """
         测试环境目标：
         模拟 Pin 列表接口报错，确保任务安全退出，不做后续写入。
@@ -172,7 +174,7 @@ class TestPinAuditEnvironment(unittest.TestCase):
             patch("pin_daily_audit.requests.get", return_value=failed_get_response),
             patch("pin_daily_audit.requests.post") as mock_post,
         ):
-            processed_count = self.auditor.run_for_yesterday()
+            processed_count = self.auditor.run_for_last_week()
 
         self.assertEqual(processed_count, 0)
         self.assertEqual(len(self.storage.archived_pin_messages), 0)

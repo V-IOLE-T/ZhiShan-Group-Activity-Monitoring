@@ -1,7 +1,7 @@
 """
-每日 Pin 审计任务
+Pin 审计任务
 
-每天 09:00 扫描“昨天新增 Pin（按 Pin 操作时间）”，并对新增且未处理的消息执行：
+当前调度策略为每周一 09:00 扫描“上周新增 Pin（按 Pin 操作时间）”，并对新增且未处理的消息执行：
 1. 归档 Pin 记录
 2. 给被 Pin 用户增加被 Pin 次数
 3. 写入精华文档（可选）
@@ -22,7 +22,7 @@ from message_renderer import MessageToDocxConverter
 
 
 class DailyPinAuditor:
-    """每日 Pin 审计器"""
+    """Pin 审计器（主流程为每周审计）"""
 
     PROCESSED_FILE = Path(__file__).parent / ".processed_daily_pins.txt"
     MAX_PIN_PAGE_SIZE = 50
@@ -39,26 +39,61 @@ class DailyPinAuditor:
         self.processed_ids: Set[str] = self._load_processed_ids()
 
         if not os.getenv("PIN_TABLE_ID"):
-            print("⚠️  未配置 PIN_TABLE_ID：每日任务将跳过 Pin 归档表写入")
+            print("⚠️  未配置 PIN_TABLE_ID：Pin 审计任务将跳过 Pin 归档表写入")
 
-    def run_for_yesterday(self) -> int:
+    def run_for_last_week(self) -> int:
         """
-        执行“昨日 Pin 审计”
+        执行“上周 Pin 审计”
 
         Returns:
             成功处理的 Pin 数量
         """
+        last_week_start, last_week_end = self._get_last_week_window()
+        week_end_date = (last_week_end - timedelta(days=1)).date().isoformat()
+        card_title = f"📌 上周加精 ({last_week_start.date().isoformat()} ~ {week_end_date})"
+        return self._run_for_window(
+            window_start=last_week_start,
+            window_end=last_week_end,
+            window_name="上周",
+            outside_window_name="非上周窗口",
+            card_title=card_title,
+        )
+
+    def run_for_yesterday(self) -> int:
+        """
+        执行“昨日 Pin 审计”（兼容旧接口，不走主调度链路）
+
+        Returns:
+            成功处理的 Pin 数量
+        """
+        yesterday_start, yesterday_end = self._get_yesterday_window()
+        card_title = f"📌 昨日加精 ({yesterday_start.date().isoformat()})"
+        return self._run_for_window(
+            window_start=yesterday_start,
+            window_end=yesterday_end,
+            window_name="昨日",
+            outside_window_name="非昨日窗口",
+            card_title=card_title,
+        )
+
+    def _run_for_window(
+        self,
+        window_start: datetime,
+        window_end: datetime,
+        window_name: str,
+        outside_window_name: str,
+        card_title: str,
+    ) -> int:
         if not self.chat_id:
-            print("❌ 未配置 CHAT_ID，跳过每日 Pin 审计")
+            print(f"❌ 未配置 CHAT_ID，跳过{window_name} Pin 审计")
             return 0
 
         pins = self._get_pinned_messages()
         if pins is None:
             return 0
 
-        yesterday_start, yesterday_end = self._get_yesterday_window()
-        yesterday_start_ms = int(yesterday_start.timestamp() * 1000)
-        yesterday_end_ms = int(yesterday_end.timestamp() * 1000)
+        window_start_ms = int(window_start.timestamp() * 1000)
+        window_end_ms = int(window_end.timestamp() * 1000)
 
         candidates = []
         skipped_processed = 0
@@ -76,19 +111,19 @@ class DailyPinAuditor:
             if pin_time_ms <= 0:
                 skipped_invalid_time += 1
                 continue
-            if yesterday_start_ms <= pin_time_ms < yesterday_end_ms:
+            if window_start_ms <= pin_time_ms < window_end_ms:
                 candidates.append(pin)
             else:
                 skipped_outside_window += 1
 
         if not candidates:
             print(
-                "📌 昨日无新增 Pin（或均已处理），不发送提醒"
-                f" | 已处理: {skipped_processed}, 非昨日窗口: {skipped_outside_window}, 无效时间: {skipped_invalid_time}"
+                f"📌 {window_name}无新增 Pin（或均已处理），不发送提醒"
+                f" | 已处理: {skipped_processed}, {outside_window_name}: {skipped_outside_window}, 无效时间: {skipped_invalid_time}"
             )
             return 0
 
-        print(f"📌 昨日新增 Pin 待处理: {len(candidates)} 条")
+        print(f"📌 {window_name}新增 Pin 待处理: {len(candidates)} 条")
 
         processed_items = []
         newly_processed_ids = set()
@@ -100,7 +135,7 @@ class DailyPinAuditor:
                 newly_processed_ids.add(item["message_id"])
 
         if not processed_items:
-            print("⚠️ 昨日 Pin 候选存在，但未成功处理任何记录")
+            print(f"⚠️ {window_name} Pin 候选存在，但未成功处理任何记录")
             return 0
 
         # 保存处理记录（去重保证：同一 message_id 只处理一次）
@@ -108,8 +143,8 @@ class DailyPinAuditor:
         self._save_processed_ids(self.processed_ids)
 
         # 仅在有新增时发送 1 张汇总卡片
-        self._send_summary_card(processed_items, yesterday_start.date().isoformat())
-        print(f"✅ 每日 Pin 审计完成：成功处理 {len(processed_items)} 条")
+        self._send_summary_card(processed_items, card_title)
+        print(f"✅ {window_name} Pin 审计完成：成功处理 {len(processed_items)} 条")
         return len(processed_items)
 
     def _process_one_pin(self, pin: dict) -> Optional[dict]:
@@ -185,12 +220,14 @@ class DailyPinAuditor:
             "content": content or "[无文本内容]",
         }
 
-    def _send_summary_card(self, items: List[dict], date_str: str) -> None:
-        """发送“昨日 Pin 汇总”卡片（1张）"""
+    def _send_summary_card(self, items: List[dict], card_title: str) -> None:
+        """发送 Pin 汇总卡片（1张）"""
         detail_lines = []
         for i, item in enumerate(items, 1):
+            pin_time = item.get("pin_time", "")
+            pin_time_display = pin_time[5:16] if len(pin_time) >= 16 else pin_time
             detail_lines.append(
-                f"{i}. {item['sender_name']}（{item['pin_time'][11:16]}）\n{item['content']}"
+                f"{i}. {item['sender_name']}（{pin_time_display}）\n{item['content']}"
             )
         detail_text = "\n".join(detail_lines)
 
@@ -198,7 +235,7 @@ class DailyPinAuditor:
             "config": {"wide_screen_mode": True},
             "header": {
                 "template": "orange",
-                "title": {"tag": "plain_text", "content": f"📌 昨日加精 ({date_str})"},
+                "title": {"tag": "plain_text", "content": card_title},
             },
             "elements": [
                 {
@@ -223,11 +260,11 @@ class DailyPinAuditor:
             resp = requests.post(url, headers=self.auth.get_headers(), params=params, json=body, timeout=10)
             data = resp.json()
             if data.get("code") == 0:
-                print("✅ 昨日 Pin 卡片发送成功")
+                print("✅ Pin 汇总卡片发送成功")
             else:
-                print(f"❌ 昨日 Pin 卡片发送失败: {data.get('msg')}")
+                print(f"❌ Pin 汇总卡片发送失败: {data.get('msg')}")
         except Exception as e:
-            print(f"❌ 昨日 Pin 卡片发送异常: {e}")
+            print(f"❌ Pin 汇总卡片发送异常: {e}")
 
     def _collect_file_tokens(self, message_id: str, detail: dict) -> List[dict]:
         """收集附件并上传为可归档 token"""
@@ -441,4 +478,14 @@ class DailyPinAuditor:
         yesterday = today - timedelta(days=1)
         start = datetime.combine(yesterday, dtime.min)
         end = start + timedelta(days=1)
+        return start, end
+
+    @staticmethod
+    def _get_last_week_window():
+        """获取上周自然周窗口（周一 00:00 到本周一 00:00）"""
+        today = datetime.now().date()
+        this_week_start = today - timedelta(days=today.weekday())
+        last_week_start = this_week_start - timedelta(days=7)
+        start = datetime.combine(last_week_start, dtime.min)
+        end = start + timedelta(days=7)
         return start, end
