@@ -72,6 +72,7 @@ class TestPinService:
         result = PinService.get_pinned_messages("chat_xxx", "Bearer token")
         assert len(result) == 2
         assert result[0]["message_id"] == "msg1"
+        assert mock_get.call_args.kwargs["params"]["page_size"] == PinService.MAX_PIN_PAGE_SIZE
 
     @patch('services.pin_service.requests.get')
     def test_get_pinned_messages_empty(self, mock_get):
@@ -103,6 +104,23 @@ class TestPinService:
 
         result = PinService.get_pinned_messages("chat_xxx", "Bearer token")
         assert len(result) == 0
+
+    @patch('services.pin_service.requests.get')
+    def test_get_pinned_messages_page_size_should_be_capped_to_50(self, mock_get):
+        """测试 page_size 超过上限时自动截断为 50"""
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "code": 0,
+            "data": {
+                "items": [],
+                "page_token": None
+            }
+        }
+        mock_get.return_value = mock_response
+
+        PinService.get_pinned_messages("chat_xxx", "Bearer token", page_size=1000)
+        assert mock_get.call_args.kwargs["params"]["page_size"] == PinService.MAX_PIN_PAGE_SIZE
 
 
 if __name__ == "__main__":

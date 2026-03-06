@@ -25,6 +25,7 @@ class DailyPinAuditor:
     """每日 Pin 审计器"""
 
     PROCESSED_FILE = Path(__file__).parent / ".processed_daily_pins.txt"
+    MAX_PIN_PAGE_SIZE = 50
 
     def __init__(self, auth, storage, chat_id: str, docx_storage=None, essence_doc_token: str = None):
         self.auth = auth
@@ -259,7 +260,7 @@ class DailyPinAuditor:
 
         try:
             while True:
-                params = {"chat_id": self.chat_id, "page_size": 100}
+                params = {"chat_id": self.chat_id, "page_size": self.MAX_PIN_PAGE_SIZE}
                 if page_token:
                     params["page_token"] = page_token
 

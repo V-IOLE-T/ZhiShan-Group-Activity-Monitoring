@@ -18,6 +18,7 @@ from utils import ThreadSafeLRUCache
 from storage import DocxStorage
 from message_renderer import MessageToDocxConverter
 from pin_scheduler import start_pin_scheduler, stop_pin_scheduler
+from services.announcement_service import AnnouncementService
 
 # 加载环境变量 (支持新的 config/ 目录)
 env_path = Path(__file__).parent / "config" / ".env"
@@ -32,6 +33,7 @@ APP_ID = os.getenv("APP_ID")
 APP_SECRET = os.getenv("APP_SECRET")
 CHAT_ID = os.getenv("CHAT_ID")
 ARCHIVE_DOC_TOKEN = os.getenv("ARCHIVE_DOC_TOKEN")
+ANNOUNCEMENT_TAGS = AnnouncementService.parse_tags(os.getenv("ANNOUNCEMENT_TAGS"))
 
 # 初始化组件
 auth = FeishuAuth()
@@ -387,18 +389,30 @@ def do_p2_im_message_receive_v1(data: lark.im.v1.P2ImMessageReceiveV1) -> None:
     # 3. 获取发送者昵称
     user_name = get_cached_nickname(sender_id)
 
-    # [Bitable归档] 已禁用: 归档消息到 Bitable (双表格模式)
-    # try:
-    #     file_tokens_for_db, text_content_for_db = _process_message_attachments(message, message.message_id)
-    #     create_time_ms = int(message.create_time)
-    #     dt_object = datetime.fromtimestamp(create_time_ms / 1000)
-    #     month_str = dt_object.strftime("%Y-%m")
-    #     archive_fields = _build_archive_fields(...)
-    #     if hasattr(archive_storage, "save_message"):
-    #         archive_storage.save_message(archive_fields)
-    #     _update_topic_summary(...)
-    # except Exception as e:
-    #     print(f"  > [Bitable] ❌ 归档失败: {e}")
+    # [公告归档] 仅识别公告标签消息并写入 Bitable
+    try:
+        if AnnouncementService.is_announcement_message(content_str, ANNOUNCEMENT_TAGS):
+            if not archive_storage.archive_table_id:
+                print("  > [公告归档] ⚠️ 未配置 ARCHIVE_TABLE_ID，跳过公告归档")
+            else:
+                text_content_for_db, _ = MetricsCalculator.extract_text_from_content(message.content)
+                create_time_ms = int(message.create_time) if message.create_time else int(datetime.now().timestamp() * 1000)
+
+                archive_fields = _build_archive_fields(
+                    message,
+                    user_name,
+                    text_content_for_db,
+                    create_time_ms,
+                )
+
+                if hasattr(archive_storage, "save_message"):
+                    saved = archive_storage.save_message(archive_fields)
+                    if saved:
+                        print("  > [公告归档] ✅ 公告已写入多维表格")
+                    else:
+                        print("  > [公告归档] ❌ 公告写入失败")
+    except Exception as e:
+        print(f"  > [公告归档] ❌ 归档失败: {e}")
 
     # 4. 构建指标增量
     metrics_delta = {
@@ -473,7 +487,7 @@ def _process_message_attachments(message, message_id: str) -> list:
     """
     file_tokens = []
 
-    # 提取纯文本和嵌入的图片 keys
+    # 提取纯文本归档内容和嵌入图片 keys
     text_content, embedded_image_keys = MetricsCalculator.extract_text_from_content(message.content)
 
     # 处理富文本中嵌入的图片
@@ -522,11 +536,8 @@ def _process_message_attachments(message, message_id: str) -> list:
 
 def _build_archive_fields(
     message,
-    sender_id: str,
     user_name: str,
     text_content: str,
-    file_tokens: list,
-    month_str: str,
     timestamp_ms: int,
 ) -> dict:
     """
@@ -534,43 +545,25 @@ def _build_archive_fields(
 
     Args:
         message: 消息对象
-        sender_id: 发送者ID
         user_name: 发送者姓名
         text_content: 消息文本内容
-        file_tokens: 附件列表
-        month_str: 统计月份
         timestamp_ms: 时间戳（毫秒）
 
     Returns:
         归档字段字典
     """
-    # 构建消息链接
-    message_link = {
-        "link": f"https://applink.feishu.cn/client/chat/open?openChatId={CHAT_ID}&messageId={message.message_id}",
-        "text": "查看消息",
-    }
+    try:
+        send_time_text = datetime.fromtimestamp(timestamp_ms / 1000).strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        send_time_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     archive_fields = {
         "消息ID": message.message_id,
         "话题ID": message.root_id or message.message_id,
-        "父消息ID": message.parent_id or "",
-        "发送者": [{"id": sender_id}],
         "发送者姓名": user_name,
         "消息内容": text_content,
-        "消息类型": message.message_type,
-        "发送时间": timestamp_ms,
-        "统计月份": month_str,
-        "消息链接": message_link,
+        "发送时间": send_time_text,
     }
-
-    # 添加附件信息
-    if file_tokens:
-        archive_fields["附件信息"] = file_tokens
-
-    # 添加@的人
-    if message.mentions:
-        mention_names = [m.name for m in message.mentions]
-        archive_fields["@的人"] = ", ".join(mention_names)
 
     return archive_fields
 

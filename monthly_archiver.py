@@ -53,15 +53,16 @@ class MonthlyArchiver:
         print("📊 正在获取当月统计表的所有记录...")
         
         while True:
-            payload = {"page_size": 500}
+            params = {"page_size": 500}
             if page_token:
-                payload["page_token"] = page_token
+                params["page_token"] = page_token
             
             try:
                 response = requests.post(
                     url, 
                     headers=self.auth.get_headers(), 
-                    json=payload, 
+                    params=params,
+                    json={},
                     timeout=30
                 )
                 data = response.json()

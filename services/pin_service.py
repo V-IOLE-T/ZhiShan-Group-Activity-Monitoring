@@ -44,6 +44,7 @@ class PinService:
 
     # 去重记录文件
     PROCESSED_FILE = Path(__file__).parent.parent / ".processed_daily_pins.txt"
+    MAX_PIN_PAGE_SIZE = 50
 
     # 类级别的缓存（所有实例共享）
     _user_name_cache = ThreadSafeLRUCache(capacity=500)
@@ -51,7 +52,7 @@ class PinService:
 
     @staticmethod
     @with_rate_limit
-    def get_pinned_messages(chat_id: str, auth_token: str, page_size: int = 100) -> List[dict]:
+    def get_pinned_messages(chat_id: str, auth_token: str, page_size: int = 50) -> List[dict]:
         """
         获取群内所有 Pin 消息列表（支持分页）
 
@@ -79,7 +80,7 @@ class PinService:
         while True:
             params = {
                 "chat_id": chat_id,
-                "page_size": min(page_size, 100)  # API 最大 100
+                "page_size": min(page_size, PinService.MAX_PIN_PAGE_SIZE)
             }
 
             if page_token:

@@ -44,10 +44,13 @@ def test_get_pinned_messages_supports_pagination(tmp_path, monkeypatch):
     assert pins is not None
     assert [p["message_id"] for p in pins] == ["m1", "m2"]
     assert mock_get.call_count == 2
-    assert mock_get.call_args_list[0].kwargs["params"] == {"chat_id": "oc_test_chat", "page_size": 100}
+    assert mock_get.call_args_list[0].kwargs["params"] == {
+        "chat_id": "oc_test_chat",
+        "page_size": DailyPinAuditor.MAX_PIN_PAGE_SIZE,
+    }
     assert mock_get.call_args_list[1].kwargs["params"] == {
         "chat_id": "oc_test_chat",
-        "page_size": 100,
+        "page_size": DailyPinAuditor.MAX_PIN_PAGE_SIZE,
         "page_token": "next_page",
     }
 

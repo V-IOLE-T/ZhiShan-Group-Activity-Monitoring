@@ -12,6 +12,7 @@
 - [开发指南](DEVELOPMENT.md)
 - [Pin 功能说明](PIN_FEATURE_GUIDE.md)
 - [可视化指南](VISUALIZATION_GUIDE.md)
+- [多维表格筛选参数说明](BITABLE_FILTER_GUIDE.md)
 
 ## 快速运行
 

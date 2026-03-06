@@ -27,6 +27,7 @@ class EnvironmentValidator:
     OPTIONAL_VARS: Dict[str, str] = {
         "ARCHIVE_TABLE_ID": "消息归档表ID（启用消息归档功能时需要）",
         "SUMMARY_TABLE_ID": "话题汇总表ID（启用话题汇总功能时需要）",
+        "ANNOUNCEMENT_TAGS": "公告识别标签（逗号分隔，如 公告,通知）",
         "PIN_TABLE_ID": "Pin消息归档表ID（启用Pin监控功能时需要）",
         "PIN_MONITOR_INTERVAL": "Pin监控轮询间隔（秒）",
     }
