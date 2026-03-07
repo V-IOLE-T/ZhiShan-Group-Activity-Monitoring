@@ -2,13 +2,123 @@
 每周 Pin 审计 & 月度归档后台调度器
 集成到主进程中，使用 schedule 库定时执行
 """
+import os
 import threading
 import time
-import os
-import schedule
-from datetime import datetime
+from datetime import datetime, timedelta
+
 from storage import BitableStorage, DocxStorage
 from pin_daily_audit import DailyPinAuditor
+
+try:
+    import schedule as _schedule_module
+except Exception:
+    _schedule_module = None
+
+
+class _MiniScheduleJob:
+    """轻量级调度任务，仅覆盖当前项目使用的日/周场景。"""
+
+    def __init__(self, scheduler):
+        self.scheduler = scheduler
+        self.unit = None
+        self.hour = 0
+        self.minute = 0
+        self.job_func = None
+        self.args = ()
+        self.kwargs = {}
+        self.next_run = None
+
+    @property
+    def monday(self):
+        self.unit = "monday"
+        return self
+
+    @property
+    def day(self):
+        self.unit = "day"
+        return self
+
+    def at(self, time_str):
+        hour_str, minute_str = time_str.split(":", 1)
+        self.hour = int(hour_str)
+        self.minute = int(minute_str)
+        return self
+
+    def do(self, job_func, *args, **kwargs):
+        self.job_func = job_func
+        self.args = args
+        self.kwargs = kwargs
+        self.next_run = self._compute_next_run(datetime.now())
+        self.scheduler.jobs.append(self)
+        return self
+
+    def should_run(self, now):
+        return self.next_run is not None and now >= self.next_run
+
+    def run(self, now=None):
+        run_time = now or datetime.now()
+        self.job_func(*self.args, **self.kwargs)
+        self.next_run = self._compute_next_run(run_time + timedelta(seconds=1))
+
+    def _compute_next_run(self, reference):
+        candidate = reference.replace(
+            hour=self.hour,
+            minute=self.minute,
+            second=0,
+            microsecond=0,
+        )
+
+        if self.unit == "day":
+            if candidate <= reference:
+                candidate += timedelta(days=1)
+            return candidate
+
+        if self.unit == "monday":
+            days_ahead = (0 - reference.weekday()) % 7
+            candidate += timedelta(days=days_ahead)
+            if candidate <= reference:
+                candidate += timedelta(days=7)
+            return candidate
+
+        raise ValueError(f"Unsupported schedule unit: {self.unit}")
+
+
+class _MiniSchedule:
+    """第三方 schedule 不可用时的最小替代实现。"""
+
+    def __init__(self):
+        self.jobs = []
+
+    def every(self):
+        return _MiniScheduleJob(self)
+
+    def clear(self):
+        self.jobs.clear()
+
+    def run_pending(self):
+        now = datetime.now()
+        for job in list(self.get_jobs()):
+            if job.should_run(now):
+                job.run(now)
+
+    def get_jobs(self):
+        return sorted(
+            self.jobs,
+            key=lambda job: job.next_run or datetime.max,
+        )
+
+
+def _load_schedule_backend():
+    required_attrs = ("every", "clear", "run_pending", "get_jobs")
+    if _schedule_module and all(hasattr(_schedule_module, attr) for attr in required_attrs):
+        return _schedule_module
+
+    print("⚠️  检测到 schedule 包不可用或安装异常，已切换到内置调度器")
+    return _MiniSchedule()
+
+
+schedule = _load_schedule_backend()
 
 
 class PinReportScheduler:
