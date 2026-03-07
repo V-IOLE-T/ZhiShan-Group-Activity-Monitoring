@@ -437,9 +437,6 @@ pytest --cov=services tests/
 
 无需额外配置，服务层自动使用现有环境变量。
 
-**已移除变量**:
-- ~~`PIN_MONITOR_INTERVAL`~~ (PinMonitor已禁用)
-
 ### 依赖
 
 无新增依赖，使用现有依赖：

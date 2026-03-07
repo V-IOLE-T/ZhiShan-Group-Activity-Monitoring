@@ -14,7 +14,7 @@ from auth import FeishuAuth
 from calculator import MetricsCalculator
 from storage import BitableStorage, MessageArchiveStorage
 from collector import MessageCollector
-from config import CACHE_USER_NAME_SIZE, CACHE_EVENT_SIZE, TOPIC_ACTIVE_DAYS, TOPIC_SILENT_DAYS
+from config import CACHE_USER_NAME_SIZE, CACHE_EVENT_SIZE
 from reply_card import DocCardProcessor
 from utils import ThreadSafeLRUCache
 from storage import DocxStorage
@@ -722,113 +722,6 @@ def _build_archive_fields(
     }
 
     return archive_fields
-
-
-def _get_topic_status(last_reply_time_ms: int) -> str:
-    """
-    根据最后回复时间判断话题状态
-
-    Args:
-        last_reply_time_ms: 最后回复时间戳（毫秒）
-
-    Returns:
-        话题状态：活跃/沉默/冷却
-    """
-    if not last_reply_time_ms:
-        return "活跃"
-
-    now = datetime.now()
-    last_reply_time = datetime.fromtimestamp(last_reply_time_ms / 1000)
-    days_since_last_reply = (now - last_reply_time).days
-
-    if days_since_last_reply <= TOPIC_ACTIVE_DAYS:
-        return "活跃"
-    elif days_since_last_reply <= TOPIC_SILENT_DAYS:
-        return "沉默"
-    else:
-        return "冷却"
-
-
-def _update_topic_summary(
-    message,
-    sender_id: str,
-    user_name: str,
-    text_content: str,
-    root_id: str,
-    month_str: str,
-    timestamp_ms: int,
-):
-    """
-    更新或创建话题汇总
-
-    Args:
-        message: 消息对象
-        sender_id: 发送者ID
-        user_name: 发送者姓名
-        text_content: 消息文本内容
-        root_id: 话题根消息ID
-        month_str: 统计月份
-        timestamp_ms: 时间戳（毫秒）
-    """
-    topic_record = archive_storage.get_topic_by_id(root_id)
-
-    # 构建话题链接
-    topic_link = {
-        "link": f"https://applink.feishu.cn/client/chat/open?openChatId={CHAT_ID}&messageId={root_id}",
-        "text": "查看话题",
-    }
-
-    if not topic_record:
-        # 创建新话题
-        summary_fields = {
-            "话题ID": root_id,
-            "话题标题": text_content,
-            "发起人": [{"id": sender_id}],
-            "发起人姓名": user_name,
-            "创建时间": timestamp_ms,
-            "最后回复时间": timestamp_ms,
-            "回复数": 0 if not message.root_id else 1,
-            "参与人数": 1,
-            "参与者": user_name,
-            "话题状态": "活跃",
-            "统计月份": month_str,
-            "话题链接": topic_link,
-        }
-        archive_storage.update_or_create_topic(root_id, summary_fields, is_new=True)
-    else:
-        # 更新已有话题
-        old_fields = topic_record["fields"]
-
-        # 更新参与者列表
-        participants = set()
-        participants_raw = old_fields.get("参与者", "")
-
-        if isinstance(participants_raw, list):
-            for item in participants_raw:
-                if isinstance(item, dict):
-                    name = item.get("text", "")
-                    if name:
-                        participants.add(name)
-                elif isinstance(item, str) and item:
-                    participants.add(item)
-        elif isinstance(participants_raw, str) and participants_raw:
-            for name in participants_raw.split(", "):
-                if name.strip():
-                    participants.add(name.strip())
-
-        participants.add(user_name)
-
-        # 计算话题状态
-        topic_status = _get_topic_status(timestamp_ms)
-
-        summary_fields = {
-            "最后回复时间": timestamp_ms,
-            "回复数": int(old_fields.get("回复数", 0)) + 1,
-            "参与人数": len(participants),
-            "参与者": ", ".join(participants),
-            "话题状态": topic_status,
-        }
-        archive_storage.update_or_create_topic(root_id, summary_fields, is_new=False)
 
 
 

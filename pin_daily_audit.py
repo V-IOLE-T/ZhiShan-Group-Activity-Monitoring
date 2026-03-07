@@ -26,6 +26,10 @@ class DailyPinAuditor:
 
     PROCESSED_FILE = Path(__file__).parent / ".processed_daily_pins.txt"
     MAX_PIN_PAGE_SIZE = 50
+    PIN_SUMMARY_COLLAPSE_THRESHOLD = 500
+    PIN_SUMMARY_PREVIEW_COUNT = 2
+    PIN_SUMMARY_PREVIEW_LENGTH = 50
+    PIN_SUMMARY_COLLAPSIBLE_TITLE = "展开查看全部帖子"
 
     def __init__(self, auth, storage, chat_id: str, docx_storage=None, essence_doc_token: str = None):
         self.auth = auth
@@ -216,37 +220,120 @@ class DailyPinAuditor:
             "message_id": message_id,
             "sender_name": sender_name,
             "operator_name": operator_name,
+            "post_time": msg_create_time_str,
             "pin_time": pin_time_str,
             "content": content or "[无文本内容]",
         }
 
-    def _send_summary_card(self, items: List[dict], card_title: str) -> None:
-        """发送 Pin 汇总卡片（1张）"""
-        detail_lines = []
-        for i, item in enumerate(items, 1):
-            pin_time = item.get("pin_time", "")
-            pin_time_display = pin_time[5:16] if len(pin_time) >= 16 else pin_time
-            detail_lines.append(
-                f"{i}. {item['sender_name']}（{pin_time_display}）\n{item['content']}"
-            )
-        detail_text = "\n".join(detail_lines)
+    def _format_post_time_for_card(self, post_time: str) -> str:
+        """将帖子发送时间压缩为卡片展示格式。"""
+        if post_time and len(post_time) >= 16:
+            return post_time[5:16]
+        return post_time or ""
 
-        card = {
-            "config": {"wide_screen_mode": True},
+    def _build_summary_detail_line(
+        self,
+        index: int,
+        item: dict,
+        truncate_content: Optional[int] = None,
+    ) -> str:
+        """构建单条帖子明细。"""
+        post_time = item.get("post_time") or item.get("create_time") or ""
+        post_time_display = self._format_post_time_for_card(post_time)
+        content = (item.get("content") or "[无文本内容]").strip()
+
+        if truncate_content and len(content) > truncate_content:
+            content = f"{content[:truncate_content]}..."
+
+        return f"{index}. {item['sender_name']}（{post_time_display}）\n{content}"
+
+    def _build_summary_detail_text(self, items: List[dict]) -> str:
+        """构建完整帖子明细文本。"""
+        detail_lines = [
+            self._build_summary_detail_line(index, item)
+            for index, item in enumerate(items, 1)
+        ]
+        return "\n".join(detail_lines)
+
+    def _build_summary_preview_text(self, items: List[dict]) -> str:
+        """构建折叠前的帖子预览摘要。"""
+        preview_lines = [f"本次新增 {len(items)} 条 Pin"]
+
+        for index, item in enumerate(items[: self.PIN_SUMMARY_PREVIEW_COUNT], 1):
+            preview_lines.append(
+                self._build_summary_detail_line(
+                    index,
+                    item,
+                    truncate_content=self.PIN_SUMMARY_PREVIEW_LENGTH,
+                )
+            )
+
+        if len(items) > self.PIN_SUMMARY_PREVIEW_COUNT:
+            preview_lines.append("其余内容请展开查看")
+        else:
+            preview_lines.append("完整内容请展开查看")
+
+        return "\n".join(preview_lines)
+
+    def _build_summary_card_payload(self, items: List[dict], card_title: str) -> dict:
+        """构建 Pin 汇总卡片 payload。"""
+        detail_text = self._build_summary_detail_text(items)
+
+        if len(detail_text) > self.PIN_SUMMARY_COLLAPSE_THRESHOLD:
+            body_elements = [
+                {
+                    "tag": "markdown",
+                    "content": self._build_summary_preview_text(items),
+                },
+                {
+                    "tag": "collapsible_panel",
+                    "expanded": False,
+                    "header": {
+                        "title": {
+                            "tag": "plain_text",
+                            "content": self.PIN_SUMMARY_COLLAPSIBLE_TITLE,
+                        },
+                        "icon": {
+                            "tag": "standard_icon",
+                            "token": "down-small-ccm_outlined",
+                            "size": "16px 16px",
+                        },
+                        "icon_position": "right",
+                    },
+                    "elements": [
+                        {
+                            "tag": "markdown",
+                            "content": detail_text,
+                        }
+                    ],
+                },
+            ]
+        else:
+            body_elements = [
+                {
+                    "tag": "markdown",
+                    "content": detail_text,
+                }
+            ]
+
+        return {
+            "schema": "2.0",
+            "config": {
+                "wide_screen_mode": True,
+                "update_multi": True,
+            },
             "header": {
                 "template": "orange",
                 "title": {"tag": "plain_text", "content": card_title},
             },
-            "elements": [
-                {
-                    "tag": "div",
-                    "text": {
-                        "tag": "lark_md",
-                        "content": detail_text,
-                    },
-                },
-            ],
+            "body": {
+                "elements": body_elements,
+            },
         }
+
+    def _send_summary_card(self, items: List[dict], card_title: str) -> None:
+        """发送 Pin 汇总卡片（1张）"""
+        card = self._build_summary_card_payload(items, card_title)
 
         url = "https://open.feishu.cn/open-apis/im/v1/messages"
         params = {"receive_id_type": "chat_id"}

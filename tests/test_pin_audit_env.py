@@ -1,4 +1,5 @@
 import datetime as dt
+import json
 import sys
 import tempfile
 import types
@@ -154,6 +155,13 @@ class TestPinAuditEnvironment(unittest.TestCase):
         self.assertEqual(mock_post.call_count, 1)
         self.assertIn("msg_last_week", self.auditor.processed_ids)
         self.assertNotIn("msg_old", self.auditor.processed_ids)
+
+        sent_body = mock_post.call_args.kwargs["json"]
+        sent_card = json.loads(sent_body["content"])
+        sent_text = sent_card["body"]["elements"][0]["content"]
+        self.assertEqual(sent_body["msg_type"], "interactive")
+        self.assertIn("Alice（02-20 10:30）", sent_text)
+        self.assertNotIn("Admin", sent_text)
 
         first_get = all_get_calls[0]
         self.assertTrue(first_get["url"].endswith("/im/v1/pins"))
