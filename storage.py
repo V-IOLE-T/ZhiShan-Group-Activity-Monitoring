@@ -364,7 +364,6 @@ class MessageArchiveStorage:
         self.auth = auth
         self.app_token = os.getenv("BITABLE_APP_TOKEN")
         self.archive_table_id = os.getenv("ARCHIVE_TABLE_ID")
-        self.summary_table_id = os.getenv("SUMMARY_TABLE_ID")
 
     @with_rate_limit
     def save_message(self, fields):
@@ -388,48 +387,6 @@ class MessageArchiveStorage:
         except Exception as e:
             print(f"  > [归档] ❌ 归档出错: {e}")
             return False
-
-    @with_rate_limit
-    def get_topic_by_id(self, topic_id):
-        """根据话题ID查找话题汇总记录"""
-        url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{self.app_token}/tables/{self.summary_table_id}/records/search"
-        payload = {
-            "filter": {
-                "conjunction": "and",
-                "conditions": [{"field_name": "话题ID", "operator": "is", "value": [topic_id]}],
-            }
-        }
-        try:
-            response = requests.post(url, headers=self.auth.get_headers(), json=payload, timeout=10)
-            data = response.json()
-            if data.get("code") == 0:
-                items = data.get("data", {}).get("items", [])
-                return items[0] if items else None
-        except Exception as e:
-            print(f"  > [汇总] 🔍 查找话题出错: {e}")
-        return None
-
-    @with_rate_limit
-    def update_or_create_topic(self, topic_id, fields, is_new=False):
-        """创建或更新话题汇总记录"""
-        if is_new:
-            url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{self.app_token}/tables/{self.summary_table_id}/records"
-            resp = requests.post(
-                url, headers=self.auth.get_headers(), json={"fields": fields}, timeout=10
-            )
-        else:
-            # 先找到 record_id
-            record = self.get_topic_by_id(topic_id)
-            if not record:
-                return False
-            record_id = record["record_id"]
-            url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{self.app_token}/tables/{self.summary_table_id}/records/{record_id}"
-            resp = requests.put(
-                url, headers=self.auth.get_headers(), json={"fields": fields}, timeout=10
-            )
-
-        result = resp.json()
-        return result.get("code") == 0
 
     def download_message_resource(self, message_id, file_key, resource_type):
         """从飞书消息中下载资源（图片或文件）"""

@@ -25,12 +25,13 @@ class EnvironmentValidator:
 
     # 可选的环境变量
     OPTIONAL_VARS: Dict[str, str] = {
-        "ARCHIVE_TABLE_ID": "消息归档表ID（启用消息归档功能时需要）",
-        "SUMMARY_TABLE_ID": "话题汇总表ID（启用话题汇总功能时需要）",
-        "ANNOUNCEMENT_TAGS": "公告识别标签（逗号分隔，如 公告,通知）",
-        "PIN_TABLE_ID": "Pin消息归档表ID（启用Pin监控功能时需要）",
-        "PIN_MONITOR_INTERVAL": "Pin监控轮询间隔（秒）",
+        "ARCHIVE_TABLE_ID": "公告归档表ID（启用公告专表写入时需要）",
+        "ANNOUNCEMENT_TAGS": "公告识别标签（可选覆盖，默认值：公告,通知）",
+        "PIN_TABLE_ID": "Pin归档表ID（启用每周 Pin 审计写表时需要）",
+        "ARCHIVE_STATS_TABLE_ID": "月度归档历史表ID（启用月度归档时需要）",
     }
+
+    DEFAULT_ANNOUNCEMENT_TAGS = "公告,通知"
 
     @classmethod
     def validate(cls, strict: bool = True) -> Tuple[bool, List[str]]:
@@ -75,24 +76,23 @@ class EnvironmentValidator:
         print("📋 可选功能配置状态：")
         for var, desc in cls.OPTIONAL_VARS.items():
             value = os.getenv(var)
+            if var == "ANNOUNCEMENT_TAGS":
+                if value:
+                    normalized_tags = ",".join(
+                        part.strip() for part in value.split(",") if part.strip()
+                    )
+                    print(f"  ✅ {desc}: {normalized_tags}")
+                else:
+                    print(
+                        f"  ⚪ {desc}: 未配置，将使用默认值：{cls.DEFAULT_ANNOUNCEMENT_TAGS}"
+                    )
+                continue
+
             if value:
                 print(f"  ✅ {desc}: 已配置")
             else:
                 print(f"  ⚪ {desc}: 未配置")
                 warnings.append(f"  ⚪ {var} ({desc})")
-
-        # 特殊验证：数值类型
-        interval = os.getenv("PIN_MONITOR_INTERVAL", "30")
-        try:
-            interval_int = int(interval)
-            if interval_int < 10 or interval_int > 3600:
-                warning = f"  ⚠️ PIN_MONITOR_INTERVAL 建议设置在10-3600秒之间，当前值: {interval_int}"
-                print(warning)
-                warnings.append(warning)
-        except ValueError:
-            warning = f"  ⚠️ PIN_MONITOR_INTERVAL 格式错误，应为整数，当前值: {interval}"
-            print(warning)
-            warnings.append(warning)
 
         print("")
         return True, warnings

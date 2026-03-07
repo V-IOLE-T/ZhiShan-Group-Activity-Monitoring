@@ -1,69 +1,64 @@
-import sys
-import types
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-# pin_scheduler.py 依赖 schedule；当前解释器中若 schedule 模块不可用/不完整，则注入最小桩
-if "schedule" in sys.modules and not hasattr(sys.modules["schedule"], "every"):
-    del sys.modules["schedule"]
-if "schedule" not in sys.modules:
-    schedule_stub = types.ModuleType("schedule")
-    schedule_stub.every = Mock()
-    schedule_stub.clear = Mock()
-    schedule_stub.run_pending = Mock()
-    schedule_stub.get_jobs = Mock(return_value=[])
-    sys.modules["schedule"] = schedule_stub
-
-# pin_daily_audit.py 依赖 message_renderer；当前仓库缺失该文件时，测试环境注入最小桩实现
-if "message_renderer" not in sys.modules:
-    message_renderer_stub = types.ModuleType("message_renderer")
-
-    class MessageToDocxConverter:  # noqa: N801
-        def __init__(self, docx_storage):  # noqa: D401, ARG002
-            self.docx_storage = docx_storage
-
-        def convert(self, raw_content, message_id, doc_token, sender_name=None, send_time=None):  # noqa: ARG002
-            return []
-
-    message_renderer_stub.MessageToDocxConverter = MessageToDocxConverter
-    sys.modules["message_renderer"] = message_renderer_stub
-
-# pin_scheduler.py 依赖 storage；当前仓库缺失该文件时，测试环境注入最小桩实现
-if "storage" not in sys.modules:
-    stub_module = types.ModuleType("storage")
-
-    class BitableStorage:  # noqa: N801
-        def __init__(self, auth):  # noqa: D401, ARG002
-            pass
-
-    class DocxStorage:  # noqa: N801
-        def __init__(self, auth):  # noqa: D401, ARG002
-            pass
-
-    stub_module.BitableStorage = BitableStorage
-    stub_module.DocxStorage = DocxStorage
-    sys.modules["storage"] = stub_module
-
-from pin_scheduler import PinReportScheduler
+import pin_scheduler
 
 
-def test_scheduler_registers_weekly_audit_on_monday_at_0900():
-    scheduler = PinReportScheduler(auth=None)
-    scheduler.pin_auditor = Mock()
-    scheduler.archiver = None
-
+def _build_job_mock():
     job = Mock()
     job.monday = job
+    job.day = job
     job.at.return_value = job
     job.do.return_value = job
+    return job
 
+
+def test_scheduler_registers_jobs_and_runs_startup_archive_check():
+    scheduler = pin_scheduler.PinReportScheduler(auth=None)
+    scheduler.pin_auditor = Mock()
+    scheduler.archiver = Mock()
+    scheduler.archiver.archive_table_id = "tbl_archive"
+    scheduler.archiver.should_run_startup_compensation.return_value = True
+
+    weekly_job = _build_job_mock()
+    archive_job = _build_job_mock()
     fake_thread = Mock()
+    fake_schedule = SimpleNamespace(
+        every=Mock(side_effect=[weekly_job, archive_job]),
+        clear=Mock(),
+        run_pending=Mock(),
+        get_jobs=Mock(return_value=[]),
+    )
 
-    with patch("pin_scheduler.schedule.every", return_value=job), patch(
+    with patch.object(pin_scheduler, "schedule", fake_schedule), patch(
         "pin_scheduler.threading.Thread", return_value=fake_thread
     ):
         scheduler.start()
+        scheduler.stop()
 
-    job.at.assert_any_call("09:00")
-    job.do.assert_any_call(scheduler._run_weekly_pin_job)
+    weekly_job.at.assert_called_once_with("09:00")
+    weekly_job.do.assert_called_once_with(scheduler._run_weekly_pin_job)
+    archive_job.at.assert_called_once_with("02:00")
+    archive_job.do.assert_called_once_with(scheduler._run_archive_job)
+    scheduler.archiver.archive_and_clear.assert_called_once_with()
     fake_thread.start.assert_called_once()
-    scheduler.stop()
+
+
+def test_run_archive_job_calls_archiver_when_schedule_window_allows():
+    scheduler = pin_scheduler.PinReportScheduler(auth=None)
+    scheduler.archiver = Mock()
+    scheduler.archiver.should_run_scheduled_archive.return_value = True
+
+    scheduler._run_archive_job()
+
+    scheduler.archiver.archive_and_clear.assert_called_once_with()
+
+
+def test_run_archive_job_skips_when_outside_window():
+    scheduler = pin_scheduler.PinReportScheduler(auth=None)
+    scheduler.archiver = Mock()
+    scheduler.archiver.should_run_scheduled_archive.return_value = False
+
+    scheduler._run_archive_job()
+
+    scheduler.archiver.archive_and_clear.assert_not_called()

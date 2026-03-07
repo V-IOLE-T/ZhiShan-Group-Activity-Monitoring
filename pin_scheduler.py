@@ -56,10 +56,11 @@ class PinReportScheduler:
         else:
             print("⚠️  每周 Pin 审计器不可用，跳过该调度任务")
         
-        # 2. 月度归档: 每天凌晨 2:00 检查 (仅在 1 号执行)
+        # 2. 月度归档: 每天凌晨 2:00 检查是否需要归档
         if self.archiver and self.archiver.archive_table_id:
             schedule.every().day.at("02:00").do(self._run_archive_job)
-            print("✅ 月度归档调度器已启动 (每月 1 号 02:00)")
+            print("✅ 月度归档调度器已启动 (每月 1 号 02:00，月初 3 天内补偿)")
+            self._run_archive_startup_check()
         
         # 启动后台线程
         self.thread = threading.Thread(target=self._schedule_loop, daemon=True)
@@ -102,16 +103,28 @@ class PinReportScheduler:
     def _run_daily_pin_job(self):
         """兼容旧方法名：执行每周 Pin 审计任务"""
         self._run_weekly_pin_job()
-    
-    def _run_archive_job(self):
-        """执行月度归档任务 (仅在每月 1 号)"""
+
+    def _run_archive_startup_check(self):
+        """启动时执行一次月度归档补偿检查。"""
         if not self.archiver:
             return
-        
-        # 检查是否为每月 1 号
-        if datetime.now().day != 1:
+        if not self.archiver.should_run_startup_compensation():
             return
-        
+        try:
+            print("\n🔎 启动时执行月度归档补偿检查...")
+            self.archiver.archive_and_clear()
+        except Exception as e:
+            print(f"❌ 月度归档补偿检查失败: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    def _run_archive_job(self):
+        """执行月度归档任务。"""
+        if not self.archiver:
+            return
+        if not self.archiver.should_run_scheduled_archive():
+            return
+
         try:
             print(f"\n{'='*60}")
             print(f"🔔 定时任务触发: 月度归档")
