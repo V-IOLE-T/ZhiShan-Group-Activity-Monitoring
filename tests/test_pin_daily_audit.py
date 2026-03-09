@@ -43,6 +43,25 @@ def _make_test_dir() -> Path:
     return test_dir
 
 
+def _make_post_raw_content(rows, title="") -> str:
+    return json.dumps(
+        {"post": {"zh_cn": {"title": title, "content": rows}}},
+        ensure_ascii=False,
+    )
+
+
+def _make_item(sender_name: str, post_time: str, raw_content: str, content: str = "") -> dict:
+    return {
+        "message_id": f"msg_{sender_name}",
+        "sender_name": sender_name,
+        "operator_name": "Admin",
+        "post_time": post_time,
+        "pin_time": "2026-02-21 12:00:00",
+        "content": content or "fallback text",
+        "raw_content": raw_content,
+    }
+
+
 def test_get_pinned_messages_supports_pagination():
     auditor = _build_auditor(_make_test_dir())
 
@@ -98,6 +117,7 @@ def test_run_for_last_week_accepts_second_timestamp():
             "post_time": "2026-02-20 09:00:00",
             "pin_time": "2026-02-20 12:30:00",
             "content": "test content",
+            "raw_content": json.dumps({"text": "test content"}, ensure_ascii=False),
         }
     )
     auditor._save_processed_ids = Mock()
@@ -132,6 +152,7 @@ def test_run_for_last_week_with_two_pins_only_last_week_one_should_notify():
             "post_time": "2026-02-19 10:00:00",
             "pin_time": "2026-02-19 15:45:00",
             "content": "last week pin",
+            "raw_content": json.dumps({"text": "last week pin"}, ensure_ascii=False),
         }
     )
     auditor._save_processed_ids = Mock()
@@ -166,133 +187,146 @@ def test_run_for_last_week_if_pin_already_processed_should_not_notify():
     auditor._send_summary_card.assert_not_called()
 
 
-def test_build_summary_card_shows_full_posts_without_panel_when_within_threshold():
+def test_render_raw_content_to_card_markdown_preserves_paragraphs_and_rich_text():
+    auditor = _build_auditor(_make_test_dir())
+    raw_content = _make_post_raw_content(
+        [
+            [{"tag": "text", "text": "#个人思考"}],
+            [{"tag": "text", "text": "加粗", "style": ["bold"]}, {"tag": "text", "text": "普通"}],
+            [{"tag": "text", "text": "斜体", "style": ["italic"]}],
+            [{"tag": "text", "text": "删除线", "style": ["lineThrough"]}],
+            [{"tag": "a", "text": "查看详情", "href": "https://example.com"}],
+            [{"tag": "at", "user_name": "小明"}],
+            [{"tag": "text", "text": "1. 列表项"}],
+            [{"tag": "img", "image_key": "img_xxx"}],
+            [{"tag": "file", "file_key": "file_xxx"}],
+        ]
+    )
+
+    markdown = auditor._render_raw_content_to_card_markdown(raw_content)
+
+    assert "\\#个人思考" in markdown
+    assert "**加粗**普通" in markdown
+    assert "*斜体*" in markdown
+    assert "~~删除线~~" in markdown
+    assert "[查看详情](https://example.com)" in markdown
+    assert "@小明" in markdown
+    assert "1. 列表项" in markdown
+    assert "[图片]" in markdown
+    assert "[附件]" in markdown
+    assert "\n\n" in markdown
+
+
+def test_render_text_message_preserves_paragraphs_and_escapes_heading_marker():
+    auditor = _build_auditor(_make_test_dir())
+    raw_content = json.dumps(
+        {"text": "#个人思考\n第一段\n\n第二段\n\n\n第三段"},
+        ensure_ascii=False,
+    )
+
+    markdown = auditor._render_raw_content_to_card_markdown(raw_content)
+
+    assert markdown.startswith("\\#个人思考")
+    assert "第一段\n\n第二段\n\n第三段" in markdown
+
+
+def test_build_summary_card_shows_all_previews_and_section_titles_when_collapsed():
     auditor = _build_auditor(_make_test_dir())
     items = [
-        {
-            "message_id": "m1",
-            "sender_name": "Alice",
-            "operator_name": "Admin",
-            "post_time": "2026-02-20 10:30:00",
-            "pin_time": "2026-02-21 12:00:00",
-            "content": "短内容",
-        }
-    ]
-
-    card = auditor._build_summary_card_payload(items, "📌 上周加精")
-
-    assert card["schema"] == "2.0"
-    assert card["body"]["elements"][0]["tag"] == "markdown"
-    assert "collapsible_panel" not in json.dumps(card, ensure_ascii=False)
-    assert "02-20 10:30" in card["body"]["elements"][0]["content"]
-    assert "02-21 12:00" not in card["body"]["elements"][0]["content"]
-
-
-def test_build_summary_card_wraps_long_posts_in_collapsible_panel():
-    auditor = _build_auditor(_make_test_dir())
-    items = [
-        {
-            "message_id": "m1",
-            "sender_name": "Alice",
-            "operator_name": "Admin",
-            "post_time": "2026-02-20 10:30:00",
-            "pin_time": "2026-02-21 12:00:00",
-            "content": "A" * 260,
-        },
-        {
-            "message_id": "m2",
-            "sender_name": "Bob",
-            "operator_name": "Admin",
-            "post_time": "2026-02-20 11:30:00",
-            "pin_time": "2026-02-21 13:00:00",
-            "content": "B" * 260,
-        },
-        {
-            "message_id": "m3",
-            "sender_name": "Carol",
-            "operator_name": "Admin",
-            "post_time": "2026-02-20 12:30:00",
-            "pin_time": "2026-02-21 14:00:00",
-            "content": "C" * 80,
-        },
+        _make_item(
+            "Alice",
+            "2026-02-20 10:30:00",
+            _make_post_raw_content(
+                [
+                    [{"tag": "text", "text": "#个人思考"}],
+                    [{"tag": "text", "text": "A" * 220}],
+                    [{"tag": "a", "text": "查看详情", "href": "https://example.com/a"}],
+                    [{"tag": "text", "text": "1. 第一条内部列表"}],
+                ]
+            ),
+        ),
+        _make_item(
+            "Bob",
+            "2026-02-20 11:30:00",
+            _make_post_raw_content(
+                [
+                    [{"tag": "text", "text": "B" * 220}],
+                    [{"tag": "text", "text": "第二条补充说明"}],
+                ]
+            ),
+        ),
+        _make_item(
+            "Carol",
+            "2026-02-20 12:30:00",
+            _make_post_raw_content(
+                [
+                    [{"tag": "text", "text": "C" * 160}],
+                    [{"tag": "text", "text": "第三条补充说明"}],
+                ]
+            ),
+        ),
     ]
 
     card = auditor._build_summary_card_payload(items, "📌 上周加精")
     body_elements = card["body"]["elements"]
-    preview_element = body_elements[0]
-    panel_element = body_elements[1]
-    panel_text = panel_element["elements"][0]["content"]
+    preview_markdowns = [element["content"] for element in body_elements if element["tag"] == "markdown"]
+    panel = body_elements[-1]
+    panel_markdowns = [element["content"] for element in panel["elements"] if element["tag"] == "markdown"]
 
-    assert len(body_elements) == 2
-    assert preview_element["tag"] == "markdown"
-    assert panel_element["tag"] == "collapsible_panel"
-    assert panel_element["expanded"] is False
-    assert panel_element["header"]["title"]["content"] == DailyPinAuditor.PIN_SUMMARY_COLLAPSIBLE_TITLE
-    assert "Alice（02-20 10:30）" in preview_element["content"]
-    assert "Bob（02-20 11:30）" in preview_element["content"]
-    assert "Carol" not in preview_element["content"]
-    assert ("A" * DailyPinAuditor.PIN_SUMMARY_PREVIEW_LENGTH) + "..." in preview_element["content"]
-    assert ("B" * DailyPinAuditor.PIN_SUMMARY_PREVIEW_LENGTH) + "..." in preview_element["content"]
-    assert "02-21 12:00" not in preview_element["content"]
-    assert "02-21 13:00" not in preview_element["content"]
-    assert "Alice（02-20 10:30）" in panel_text
-    assert "Bob（02-20 11:30）" in panel_text
-    assert "Carol（02-20 12:30）" in panel_text
-    assert "A" * 260 in panel_text
-    assert "B" * 260 in panel_text
-    assert "C" * 80 in panel_text
+    assert card["schema"] == "2.0"
+    assert body_elements[-1]["tag"] == "collapsible_panel"
+    assert len(preview_markdowns) == 4
+    assert preview_markdowns[0] == "本次新增 3 条 Pin"
+    assert "**【帖子一】Alice（02-20 10:30）**" in preview_markdowns[1]
+    assert "**【帖子二】Bob（02-20 11:30）**" in preview_markdowns[2]
+    assert "**【帖子三】Carol（02-20 12:30）**" in preview_markdowns[3]
+    assert "](https://example.com/a)" not in preview_markdowns[1]
+    assert "1. Alice" not in json.dumps(card, ensure_ascii=False)
+    assert "2. Bob" not in json.dumps(card, ensure_ascii=False)
+    assert len(panel_markdowns) == 3
+    assert "\\#个人思考" in panel_markdowns[0]
+    assert "[查看详情](https://example.com/a)" in panel_markdowns[0]
+    assert "1. 第一条内部列表" in panel_markdowns[0]
+    assert "B" * 220 in panel_markdowns[1]
+    assert "C" * 160 in panel_markdowns[2]
+    assert len([element for element in panel["elements"] if element["tag"] == "hr"]) == 2
 
 
-def test_build_summary_card_respects_500_501_threshold_boundary():
+def test_build_summary_card_respects_500_501_visible_text_boundary():
     auditor = _build_auditor(_make_test_dir())
-    detail_prefix = "1. Alice（02-20 10:30）\n"
-    exact_500_content = "X" * (DailyPinAuditor.PIN_SUMMARY_COLLAPSE_THRESHOLD - len(detail_prefix))
-    overflow_content = exact_500_content + "Y"
-
-    short_card = auditor._build_summary_card_payload(
-        [
-            {
-                "message_id": "m1",
-                "sender_name": "Alice",
-                "operator_name": "Admin",
-                "post_time": "2026-02-20 10:30:00",
-                "pin_time": "2026-02-21 12:00:00",
-                "content": exact_500_content,
-            }
-        ],
-        "📌 上周加精",
+    short_item = _make_item(
+        "Alice",
+        "2026-02-20 10:30:00",
+        json.dumps({"text": "X" * 500}, ensure_ascii=False),
+        content="X" * 500,
     )
-    long_card = auditor._build_summary_card_payload(
-        [
-            {
-                "message_id": "m1",
-                "sender_name": "Alice",
-                "operator_name": "Admin",
-                "post_time": "2026-02-20 10:30:00",
-                "pin_time": "2026-02-21 12:00:00",
-                "content": overflow_content,
-            }
-        ],
-        "📌 上周加精",
+    long_item = _make_item(
+        "Alice",
+        "2026-02-20 10:30:00",
+        json.dumps({"text": "X" * 501}, ensure_ascii=False),
+        content="X" * 501,
     )
 
-    assert len(short_card["body"]["elements"]) == 1
-    assert short_card["body"]["elements"][0]["tag"] == "markdown"
-    assert len(long_card["body"]["elements"]) == 2
-    assert long_card["body"]["elements"][1]["tag"] == "collapsible_panel"
+    short_card = auditor._build_summary_card_payload([short_item], "📌 上周加精")
+    long_card = auditor._build_summary_card_payload([long_item], "📌 上周加精")
+
+    assert all(element["tag"] != "collapsible_panel" for element in short_card["body"]["elements"])
+    assert long_card["body"]["elements"][-1]["tag"] == "collapsible_panel"
 
 
 def test_send_summary_card_posts_interactive_payload():
     auditor = _build_auditor(_make_test_dir())
     items = [
-        {
-            "message_id": "m1",
-            "sender_name": "Alice",
-            "operator_name": "Admin",
-            "post_time": "2026-02-20 10:30:00",
-            "pin_time": "2026-02-21 12:00:00",
-            "content": "hello world",
-        }
+        _make_item(
+            "Alice",
+            "2026-02-20 10:30:00",
+            _make_post_raw_content(
+                [
+                    [{"tag": "text", "text": "#个人思考"}],
+                    [{"tag": "text", "text": "hello world"}],
+                ]
+            ),
+        )
     ]
     fake_response = Mock()
     fake_response.json.return_value = {"code": 0, "msg": "success"}
@@ -302,5 +336,8 @@ def test_send_summary_card_posts_interactive_payload():
 
     sent_body = mock_post.call_args.kwargs["json"]
     sent_card = json.loads(sent_body["content"])
+    sent_payload = json.dumps(sent_card, ensure_ascii=False)
+
     assert sent_body["msg_type"] == "interactive"
-    assert sent_card["body"]["elements"][0]["tag"] == "markdown"
+    assert "**【帖子一】Alice（02-20 10:30）**" in sent_payload
+    assert "\\#个人思考" in sent_payload
