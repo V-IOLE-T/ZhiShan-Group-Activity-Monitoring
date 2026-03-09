@@ -96,8 +96,28 @@ class TestPinAuditEnvironment(unittest.TestCase):
         last_week_start = this_week_start - dt.timedelta(days=7)
         last_week_end = this_week_start
 
-        last_week_pin_ms = int(dt.datetime(2026, 2, 20, 10, 30, 0).timestamp() * 1000)
+        post_create_time = dt.datetime(2026, 2, 20, 10, 30, 0)
+        pin_create_time = dt.datetime(2026, 2, 21, 9, 0, 0)
+        post_create_ms = int(post_create_time.timestamp() * 1000)
+        last_week_pin_ms = int(pin_create_time.timestamp() * 1000)
         old_pin_ms = int(dt.datetime(2026, 2, 23, 9, 0, 0).timestamp() * 1000)
+
+        long_post_content = json.dumps(
+            {
+                "post": {
+                    "zh_cn": {
+                        "title": "#个人思考",
+                        "content": [
+                            [{"tag": "text", "text": "第一段" + ("A" * 260)}],
+                            [{"tag": "a", "text": "查看详情", "href": "https://example.com/post"}],
+                            [{"tag": "text", "text": "1. 列表项"}],
+                            [{"tag": "text", "text": "第二段" + ("B" * 260)}],
+                        ],
+                    }
+                }
+            },
+            ensure_ascii=False,
+        )
 
         all_get_calls = []
 
@@ -126,9 +146,9 @@ class TestPinAuditEnvironment(unittest.TestCase):
                         "items": [
                             {
                                 "sender": {"id": {"open_id": "ou_sender_1"}},
-                                "msg_type": "text",
-                                "body": {"content": '{"text":"hello pin"}'},
-                                "create_time": str(last_week_pin_ms),
+                                "msg_type": "post",
+                                "body": {"content": long_post_content},
+                                "create_time": str(post_create_ms),
                             }
                         ]
                     },
@@ -158,10 +178,21 @@ class TestPinAuditEnvironment(unittest.TestCase):
 
         sent_body = mock_post.call_args.kwargs["json"]
         sent_card = json.loads(sent_body["content"])
-        sent_text = sent_card["body"]["elements"][0]["content"]
+        sent_payload = json.dumps(sent_card, ensure_ascii=False)
+        preview_markdowns = [element["content"] for element in sent_card["body"]["elements"] if element["tag"] == "markdown"]
+        panel = sent_card["body"]["elements"][-1]
+        panel_markdown = panel["elements"][0]["content"]
+
         self.assertEqual(sent_body["msg_type"], "interactive")
-        self.assertIn("Alice（02-20 10:30）", sent_text)
-        self.assertNotIn("Admin", sent_text)
+        self.assertEqual(sent_card["body"]["elements"][-1]["tag"], "collapsible_panel")
+        self.assertEqual(preview_markdowns[0], "本次新增 1 条 Pin")
+        self.assertIn("**【帖子一】Alice（02-20 10:30）**", preview_markdowns[1])
+        self.assertIn("**【帖子一】Alice（02-20 10:30）**", panel_markdown)
+        self.assertIn("\\#个人思考", panel_markdown)
+        self.assertIn("[查看详情](https://example.com/post)", panel_markdown)
+        self.assertIn("1. 列表项", panel_markdown)
+        self.assertNotIn("02-21 09:00", sent_payload)
+        self.assertNotIn("Admin", sent_payload)
 
         first_get = all_get_calls[0]
         self.assertTrue(first_get["url"].endswith("/im/v1/pins"))
